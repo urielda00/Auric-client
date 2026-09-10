@@ -2,6 +2,7 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 
 const { ApiError, createApiClient } = require("../src/services/apiClient.cjs");
+const { createAddMusicApi, mapImportJob } = require("../src/services/addMusicApi.cjs");
 const {
   createLatestSearchRunner,
 } = require("../src/services/latestSearch.cjs");
@@ -57,6 +58,50 @@ test("API client parses successful envelopes", async () => {
   });
   const response = await client.get("/api/v1/tracks/example");
   assert.equal(response.data.title, "Track");
+});
+
+test("API client sends JSON command bodies", async () => {
+  let request;
+  const client = createApiClient({
+    baseUrl: "http://auric.test",
+    fetchImpl: async (_url, options) => {
+      request = options;
+      return { ok: true, status: 202, json: async () => ({ data: { id: "job" } }) };
+    },
+  });
+  await client.post("/api/v1/imports", { title: "Track" });
+  assert.equal(request.method, "POST");
+  assert.equal(request.headers["Content-Type"], "application/json");
+  assert.equal(request.body, JSON.stringify({ title: "Track" }));
+});
+
+test("Add Music API polls through ready and keeps only the safe job DTO", async () => {
+  const jobs = [
+    {
+      id: "job-1", status: "queued", created_at: "2026-01-01T00:00:00.000Z",
+      updated_at: "2026-01-01T00:00:00.000Z", track_id: null,
+      failure_code: null, failure_message: null, can_retry: false,
+      request_snapshot_json: "must not leak",
+    },
+    {
+      id: "job-1", status: "ready", created_at: "2026-01-01T00:00:00.000Z",
+      updated_at: "2026-01-01T00:00:01.000Z", track_id: "track-1",
+      failure_code: null, failure_message: null, can_retry: false,
+    },
+  ];
+  const seen = [];
+  const api = createAddMusicApi({
+    post: async () => ({ data: jobs[0] }),
+    get: async () => ({ data: jobs[1] }),
+  }, { pollIntervalMs: 0 });
+  const result = await api.submit({ title: "Track" }, (job) => seen.push(job.status));
+  assert.deepEqual(seen, ["queued", "ready"]);
+  assert.equal(result.trackId, "track-1");
+  assert.equal(Object.hasOwn(result, "request_snapshot_json"), false);
+});
+
+test("Add Music job DTO rejects raw or malformed server state", () => {
+  assert.throws(() => mapImportJob({ id: "job", status: "ready" }), /Invalid import job response/);
 });
 
 test("API client preserves canonical server errors", async () => {

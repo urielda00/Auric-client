@@ -14,8 +14,7 @@ function createApiClient({ baseUrl, timeoutMs = 10000, fetchImpl = globalThis.fe
   if (!baseUrl) throw new Error('Auric API base URL is not configured');
   if (typeof fetchImpl !== 'function') throw new Error('Fetch is unavailable');
 
-  return {
-    async get(path, { query, signal } = {}) {
+  async function request(method, path, { query, body: requestBody, signal } = {}) {
       const controller = new AbortController();
       const onAbort = () => controller.abort(signal?.reason);
       signal?.addEventListener('abort', onAbort, { once: true });
@@ -29,8 +28,12 @@ function createApiClient({ baseUrl, timeoutMs = 10000, fetchImpl = globalThis.fe
         let response;
         try {
           response = await fetchImpl(url.toString(), {
-            method: 'GET',
-            headers: { Accept: 'application/json' },
+            method,
+            headers: {
+              Accept: 'application/json',
+              ...(requestBody === undefined ? {} : { 'Content-Type': 'application/json' }),
+            },
+            ...(requestBody === undefined ? {} : { body: JSON.stringify(requestBody) }),
             signal: controller.signal,
           });
         } catch (cause) {
@@ -81,6 +84,14 @@ function createApiClient({ baseUrl, timeoutMs = 10000, fetchImpl = globalThis.fe
         clearTimeout(timeout);
         signal?.removeEventListener('abort', onAbort);
       }
+  }
+
+  return {
+    get(path, options) {
+      return request('GET', path, options);
+    },
+    post(path, body, options = {}) {
+      return request('POST', path, { ...options, body });
     },
   };
 }

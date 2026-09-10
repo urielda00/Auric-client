@@ -1,18 +1,26 @@
 import { musicService } from './musicService';
 import { trackArt } from '../utils/artwork';
+import { apiConfig } from './apiConfig';
 
-/**
- * Mock "Add Music" pipeline. Parses the metadata JSON a user would get from an AI
- * assistant, previews it, then simulates the Queued -> Downloading -> Processing -> Ready
- * lifecycle a real download/transcode would go through on the home server. No network
- * calls, no files — `runAddFlow` just waits and then inserts the track into musicService.
- */
+const { createApiClient } = require('./apiClient.cjs');
+const { createAddMusicApi } = require('./addMusicApi.cjs');
 
 export const STATUS_STEPS = ['Queued', 'Downloading', 'Processing', 'Ready'];
 const STEP_DELAY_MS = 1200;
+const ALLOWED_FIELDS = new Set([
+  'source_url', 'title', 'artists', 'version', 'album', 'release_year',
+  'genre', 'duration_ms', 'search_aliases', 'search_keywords',
+]);
 
-export const AI_INSTRUCTIONS = `You are helping me add a song to my personal music library, Auric.
-Reply with ONLY a JSON object (no prose, no markdown fences) shaped like:
+const addMusicApi = apiConfig.useServer
+  ? createAddMusicApi(createApiClient({
+      baseUrl: apiConfig.baseUrl,
+      timeoutMs: apiConfig.timeoutMs,
+    }))
+  : null;
+
+export const AI_INSTRUCTIONS = `You are helping me add one song to my personal music library, Auric.
+Reply with ONLY one JSON object (no prose and no markdown fences) shaped exactly like:
 
 {
   "source_url": "https://www.youtube.com/watch?v=...",
@@ -27,71 +35,140 @@ Reply with ONLY a JSON object (no prose, no markdown fences) shaped like:
   "search_keywords": []
 }
 
-Fill in every field you can determine; use null for anything unknown. "title" and
-"artists" are required.`;
+Use a YouTube video URL. Preserve artist order. Fill every field; use null for
+unknown optional scalar values and [] for unknown aliases or keywords. Do not add
+IDs, filenames, hashes, source_video_id, storage paths, or media_files data.`;
+
+function requiredText(value, field) {
+  if (typeof value !== 'string' || !value.trim()) {
+    throw new Error(`Missing required field: ${field}`);
+  }
+  return value.trim();
+}
+
+function nullableText(value, field) {
+  if (value === null) return null;
+  if (typeof value !== 'string' || !value.trim()) {
+    throw new Error(`${field} must be text or null`);
+  }
+  return value.trim();
+}
+
+function textArray(value, field, { required = false } = {}) {
+  if (!Array.isArray(value) || (required && value.length === 0)) {
+    throw new Error(`${field} must be ${required ? 'a non-empty' : 'an'} array`);
+  }
+  if (value.some((item) => typeof item !== 'string' || !item.trim())) {
+    throw new Error(`${field} must contain only non-empty text`);
+  }
+  return value.map((item) => item.trim());
+}
 
 function normalizeInput(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
     throw new Error('Expected a single JSON object.');
   }
-  if (!raw.title || typeof raw.title !== 'string' || !raw.title.trim()) {
-    throw new Error('Missing required field: title');
+  const unknown = Object.keys(raw).filter((key) => !ALLOWED_FIELDS.has(key));
+  if (unknown.length) throw new Error(`Unknown field: ${unknown[0]}`);
+  const sourceUrl = requiredText(raw.source_url, 'source_url');
+  let url;
+  try {
+    url = new URL(sourceUrl);
+  } catch {
+    throw new Error('source_url must be a valid YouTube URL');
   }
-  const artists = Array.isArray(raw.artists) && raw.artists.length ? raw.artists.filter(Boolean) : [];
-  if (!artists.length) {
-    throw new Error('Missing required field: artists');
+  const allowedHosts = ['youtube.com', 'www.youtube.com', 'm.youtube.com', 'music.youtube.com', 'youtu.be', 'www.youtu.be'];
+  if (!allowedHosts.includes(url.hostname.toLowerCase())) {
+    throw new Error('source_url must be a YouTube URL');
+  }
+  if (raw.release_year !== null && (!Number.isInteger(raw.release_year) || raw.release_year < 1 || raw.release_year > 9999)) {
+    throw new Error('release_year must be a valid year or null');
+  }
+  if (raw.duration_ms !== null && (!Number.isInteger(raw.duration_ms) || raw.duration_ms <= 0)) {
+    throw new Error('duration_ms must be a positive integer or null');
   }
   return {
-    sourceUrl: raw.source_url || null,
-    title: raw.title.trim(),
-    artists,
-    version: raw.version || null,
-    album: raw.album || null,
-    releaseYear: raw.release_year || null,
-    genre: raw.genre || null,
-    durationMs: typeof raw.duration_ms === 'number' && raw.duration_ms > 0 ? raw.duration_ms : 210000,
-    searchAliases: Array.isArray(raw.search_aliases) ? raw.search_aliases : [],
-    searchKeywords: Array.isArray(raw.search_keywords) ? raw.search_keywords : [],
+    sourceUrl,
+    title: requiredText(raw.title, 'title'),
+    artists: textArray(raw.artists, 'artists', { required: true }),
+    version: nullableText(raw.version, 'version'),
+    album: nullableText(raw.album, 'album'),
+    releaseYear: raw.release_year,
+    genre: nullableText(raw.genre, 'genre'),
+    durationMs: raw.duration_ms,
+    searchAliases: textArray(raw.search_aliases, 'search_aliases'),
+    searchKeywords: textArray(raw.search_keywords, 'search_keywords'),
   };
 }
 
+function serverPayload(input) {
+  return {
+    source_url: input.sourceUrl,
+    title: input.title,
+    artists: input.artists,
+    version: input.version,
+    album: input.album,
+    release_year: input.releaseYear,
+    genre: input.genre,
+    duration_ms: input.durationMs,
+    search_aliases: input.searchAliases,
+    search_keywords: input.searchKeywords,
+  };
+}
+
+async function runMockFlow(input, onJob, signal) {
+  for (const status of ['queued', 'downloading', 'processing', 'ready']) {
+    if (signal?.aborted) throw signal.reason;
+    onJob?.({ status, canRetry: false });
+    if (status !== 'ready') {
+      await new Promise((resolve) => setTimeout(resolve, STEP_DELAY_MS));
+    }
+  }
+  const track = await musicService.addTrack(input);
+  return { job: { status: 'ready', trackId: track.id }, track };
+}
+
 export const addMusicService = {
-  /** Parses + validates the pasted JSON, throwing a user-facing Error on failure. */
   parseAndValidate(jsonText) {
     let raw;
     try {
       raw = JSON.parse(jsonText);
-    } catch (e) {
-      throw new Error(`Couldn't parse JSON: ${e.message}`);
+    } catch (error) {
+      throw new Error(`Couldn't parse JSON: ${error.message}`);
     }
     const input = normalizeInput(raw);
-    const art = trackArt(input.title, input.artists.join(', '));
-    const preview = {
-      title: input.title,
-      artists: input.artists.join(', '),
-      version: input.version ? input.version : 'Original mix',
-      art,
-      rows: [
-        { k: 'Album', v: input.album || '—' },
-        { k: 'Year', v: input.releaseYear ? String(input.releaseYear) : '—' },
-        { k: 'Source', v: input.sourceUrl || '—' },
-      ],
+    return {
+      input,
+      preview: {
+        title: input.title,
+        artists: input.artists.join(', '),
+        version: input.version || 'Original mix',
+        art: trackArt(input.title, input.artists.join(', ')),
+        rows: [
+          { k: 'Album', v: input.album || '—' },
+          { k: 'Year', v: input.releaseYear ? String(input.releaseYear) : '—' },
+          { k: 'Source', v: input.sourceUrl },
+        ],
+      },
     };
-    return { input, preview };
   },
 
-  /**
-   * Simulates the download/processing lifecycle, calling `onStep(index)` for each of
-   * STATUS_STEPS as it's reached, then inserts the track into the library once Ready.
-   */
-  async runAddFlow(input, onStep) {
-    for (let i = 0; i < STATUS_STEPS.length; i++) {
-      onStep?.(i);
-      if (i < STATUS_STEPS.length - 1) {
-        await new Promise((resolve) => setTimeout(resolve, STEP_DELAY_MS));
-      }
-    }
-    return musicService.addTrack(input);
+  async runAddFlow(input, onJob, signal) {
+    if (!addMusicApi) return runMockFlow(input, onJob, signal);
+    const job = await addMusicApi.submit(serverPayload(input), onJob, signal);
+    const track = job.status === 'ready' && job.trackId
+      ? await musicService.getTrackById(job.trackId)
+      : null;
+    return { job, track };
+  },
+
+  async retry(jobId, onJob, signal) {
+    if (!addMusicApi) throw new Error('Mock imports do not need retry');
+    const job = await addMusicApi.retry(jobId, onJob, signal);
+    const track = job.status === 'ready' && job.trackId
+      ? await musicService.getTrackById(job.trackId)
+      : null;
+    return { job, track };
   },
 };
 

@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { View, Text, TextInput, Pressable, ScrollView, StyleSheet } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as Clipboard from 'expo-clipboard';
@@ -26,6 +26,13 @@ export default function AddMusicScreen() {
   const markCopied = useAddMusicStore((s) => s.markCopied);
   const status = useAddMusicStore((s) => s.status);
   const addTrack = useAddMusicStore((s) => s.addTrack);
+  const retry = useAddMusicStore((s) => s.retry);
+  const cancelPolling = useAddMusicStore((s) => s.cancelPolling);
+  const submitting = useAddMusicStore((s) => s.submitting);
+  const failure = useAddMusicStore((s) => s.failure);
+  const job = useAddMusicStore((s) => s.job);
+
+  useEffect(() => () => cancelPolling(), [cancelPolling]);
 
   const handleCopy = async () => {
     await Clipboard.setStringAsync(AI_INSTRUCTIONS);
@@ -91,9 +98,9 @@ export default function AddMusicScreen() {
         ) : null}
 
         {preview ? (
-          <Pressable onPress={addTrack} disabled={status >= 0}>
-            <LinearGradient colors={gradients.addTrackButton} start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }} style={[styles.addBtn, status >= 0 && styles.disabled]}>
-              <Text style={styles.addLabel}>Add Track</Text>
+          <Pressable onPress={addTrack} disabled={submitting || job?.status === 'ready'}>
+            <LinearGradient colors={gradients.addTrackButton} start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }} style={[styles.addBtn, (submitting || job?.status === 'ready') && styles.disabled]}>
+              <Text style={styles.addLabel}>{submitting ? 'Adding…' : job?.status === 'ready' ? 'Track Added' : 'Add Track'}</Text>
             </LinearGradient>
           </Pressable>
         ) : null}
@@ -113,7 +120,7 @@ export default function AddMusicScreen() {
             <Eyebrow style={{ marginBottom: 16, letterSpacing: 1.7 }}>Status</Eyebrow>
             <View style={{ gap: 14 }}>
               {ADD_STATUS_STEPS.map((label, i) => {
-                const reached = status > i;
+                const reached = status >= i;
                 const isReady = i === ADD_STATUS_STEPS.length - 1;
                 const color = reached ? (isReady ? colors.green : colors.violetLight) : '#3C3C4C';
                 return (
@@ -126,6 +133,18 @@ export default function AddMusicScreen() {
                 );
               })}
             </View>
+          </View>
+        ) : null}
+
+        {failure ? (
+          <View style={styles.importFailureCard}>
+            <Text style={styles.errorTitle}>Import failed</Text>
+            <Text style={styles.importFailureText}>{failure}</Text>
+            {job?.canRetry ? (
+              <Pressable onPress={retry} disabled={submitting} style={styles.retryBtn}>
+                <Text style={styles.retryLabel}>Retry</Text>
+              </Pressable>
+            ) : null}
           </View>
         ) : null}
 
@@ -292,6 +311,35 @@ const styles = StyleSheet.create({
     lineHeight: 18,
     color: '#C99',
     marginTop: 11,
+  },
+  importFailureCard: {
+    marginTop: 14,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: 'rgba(240,120,120,0.28)',
+    backgroundColor: 'rgba(240,120,120,0.08)',
+    padding: 15,
+  },
+  importFailureText: {
+    fontFamily: 'Manrope_500Medium',
+    fontSize: 11.5,
+    lineHeight: 18,
+    color: '#C99',
+    marginTop: 7,
+  },
+  retryBtn: {
+    alignSelf: 'flex-start',
+    marginTop: 12,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(167,140,240,0.35)',
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+  },
+  retryLabel: {
+    fontFamily: 'Manrope_700Bold',
+    fontSize: 11.5,
+    color: colors.violetLight,
   },
   statusCard: {
     marginTop: 20,
