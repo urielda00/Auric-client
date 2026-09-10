@@ -1,4 +1,4 @@
-import { AudioEngine } from './AudioEngine';
+import { AudioEngine } from "./AudioEngine";
 
 const TICK_MS = 250;
 
@@ -13,36 +13,42 @@ export class MockAudioEngine extends AudioEngine {
     this.positionMs = 0;
     this.durationMs = 0;
     this.isPlaying = false;
-    this.onProgress = null;
+    this.onStatus = null;
     this.onEnded = null;
     this.timer = null;
   }
 
   load(track) {
+    if (!track || track.hasMedia !== true)
+      throw new Error("TRACK_HAS_NO_MEDIA");
     this._stopTimer();
     this.positionMs = 0;
     this.durationMs = track?.durationMs || 0;
     this.isPlaying = false;
+    this.trackId = track.id;
+    this._emitStatus();
   }
 
   play() {
     if (this.isPlaying || this.durationMs <= 0) return;
     this.isPlaying = true;
     this._startTimer();
+    this._emitStatus();
   }
 
   pause() {
     this.isPlaying = false;
     this._stopTimer();
+    this._emitStatus();
   }
 
   seekTo(ms) {
     this.positionMs = Math.max(0, Math.min(this.durationMs, Math.round(ms)));
-    this.onProgress?.(this.positionMs);
+    this._emitStatus();
   }
 
-  setOnProgress(fn) {
-    this.onProgress = fn;
+  setOnStatus(fn) {
+    this.onStatus = fn;
   }
 
   setOnEnded(fn) {
@@ -50,12 +56,21 @@ export class MockAudioEngine extends AudioEngine {
   }
 
   getStatus() {
-    return { positionMs: this.positionMs, durationMs: this.durationMs, isPlaying: this.isPlaying };
+    return {
+      positionMs: this.positionMs,
+      durationMs: this.durationMs,
+      isPlaying: this.isPlaying,
+      isBuffering: false,
+      isLoaded: this.durationMs > 0,
+      error: null,
+      trackId: this.trackId,
+      generation: 0,
+    };
   }
 
   destroy() {
     this._stopTimer();
-    this.onProgress = null;
+    this.onStatus = null;
     this.onEnded = null;
   }
 
@@ -65,13 +80,13 @@ export class MockAudioEngine extends AudioEngine {
       this.positionMs += TICK_MS;
       if (this.positionMs >= this.durationMs) {
         this.positionMs = this.durationMs;
-        this.onProgress?.(this.positionMs);
         this.isPlaying = false;
         this._stopTimer();
-        this.onEnded?.();
+        this._emitStatus();
+        this.onEnded?.({ trackId: this.trackId, generation: 0 });
         return;
       }
-      this.onProgress?.(this.positionMs);
+      this._emitStatus();
     }, TICK_MS);
   }
 
@@ -80,6 +95,10 @@ export class MockAudioEngine extends AudioEngine {
       clearInterval(this.timer);
       this.timer = null;
     }
+  }
+
+  _emitStatus() {
+    this.onStatus?.(this.getStatus());
   }
 }
 

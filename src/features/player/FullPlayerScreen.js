@@ -1,18 +1,29 @@
-import React, { useEffect, useMemo } from 'react';
-import { View, Text, Pressable, StyleSheet, Dimensions } from 'react-native';
-import { useRouter } from 'expo-router';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import IconButton from '../../components/IconButton';
-import SeekBar from '../../components/SeekBar';
-import { DownChevron, QueueGlyph, PrevGlyph, NextGlyph, PauseBars, PlayTriangle } from '../../components/icons/Glyphs';
-import AnimatedTrackArt from './AnimatedTrackArt';
-import { usePlayerStore } from '../../stores/usePlayerStore';
-import { useLibraryStore } from '../../stores/useLibraryStore';
-import { colors, shadows } from '../../constants/theme';
-import { formatDuration, trackDisplayTitle, joinArtists } from '../../utils/format';
-import { trackArt } from '../../utils/artwork';
+import React, { useEffect, useMemo } from "react";
+import { View, Text, Pressable, StyleSheet, Dimensions } from "react-native";
+import { useRouter } from "expo-router";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
+import IconButton from "../../components/IconButton";
+import SeekBar from "../../components/SeekBar";
+import {
+  DownChevron,
+  QueueGlyph,
+  PrevGlyph,
+  NextGlyph,
+  PauseBars,
+  PlayTriangle,
+} from "../../components/icons/Glyphs";
+import AnimatedTrackArt from "./AnimatedTrackArt";
+import { usePlayerStore } from "../../stores/usePlayerStore";
+import { useLibraryStore } from "../../stores/useLibraryStore";
+import { colors, shadows } from "../../constants/theme";
+import {
+  formatDuration,
+  trackDisplayTitle,
+  joinArtists,
+} from "../../utils/format";
+import { trackArt } from "../../utils/artwork";
 
-const { width: SCREEN_WIDTH } = Dimensions.get('window');
+const { width: SCREEN_WIDTH } = Dimensions.get("window");
 const ART_SIZE = Math.min(SCREEN_WIDTH - 60, 420);
 
 export default function FullPlayerScreen() {
@@ -22,16 +33,29 @@ export default function FullPlayerScreen() {
   const isPlaying = usePlayerStore((s) => s.isPlaying);
   const positionMs = usePlayerStore((s) => s.positionMs);
   const durationMs = usePlayerStore((s) => s.durationMs);
+  const isBuffering = usePlayerStore((s) => s.isBuffering);
+  const playbackError = usePlayerStore((s) => s.playbackError);
   const playbackContext = usePlayerStore((s) => s.playbackContext);
   const toggle = usePlayerStore((s) => s.toggle);
   const seek = usePlayerStore((s) => s.seek);
   const next = usePlayerStore((s) => s.next);
   const previous = usePlayerStore((s) => s.previous);
-  const track = useLibraryStore((s) => (currentTrackId ? s.tracksById[currentTrackId] : null));
-  const isLiked = useLibraryStore((s) => (currentTrackId ? s.likedIds.includes(currentTrackId) : false));
+  const retry = usePlayerStore((s) => s.retry);
+  const track = useLibraryStore((s) =>
+    currentTrackId ? s.tracksById[currentTrackId] : null,
+  );
+  const isLiked = useLibraryStore((s) =>
+    currentTrackId ? s.likedIds.includes(currentTrackId) : false,
+  );
   const toggleLike = useLibraryStore((s) => s.toggleLike);
 
-  const ambient = useMemo(() => (track ? trackArt(track.title, track.artists.join(', '), track.visualSeed) : null), [track]);
+  const ambient = useMemo(
+    () =>
+      track
+        ? trackArt(track.title, track.artists.join(", "), track.visualSeed)
+        : null,
+    [track],
+  );
 
   useEffect(() => {
     if (!track) router.back();
@@ -39,20 +63,38 @@ export default function FullPlayerScreen() {
 
   if (!track) return null;
 
-  const pct = durationMs > 0 ? Math.min(100, (positionMs / durationMs) * 100) : 0;
+  const pct =
+    durationMs > 0 ? Math.min(100, (positionMs / durationMs) * 100) : 0;
 
   return (
     <View style={styles.screen}>
       {ambient ? (
-        <View pointerEvents="none" style={[styles.ambient, { backgroundColor: ambient.blobA }]} />
+        <View
+          pointerEvents="none"
+          style={[styles.ambient, { backgroundColor: ambient.blobA }]}
+        />
       ) : null}
 
       <View style={[styles.topBar, { paddingTop: Math.max(16, insets.top) }]}>
-        <IconButton size={38} radius={13} background={colors.surface3} border="transparent" onPress={() => router.back()}>
+        <IconButton
+          size={38}
+          radius={13}
+          background={colors.surface3}
+          border="transparent"
+          onPress={() => router.back()}
+        >
           <DownChevron />
         </IconButton>
-        <Text style={styles.sourceLabel}>{playbackContext?.label?.toUpperCase() || ''}</Text>
-        <IconButton size={38} radius={13} background={colors.surface3} border="transparent" onPress={() => router.push('/queue')}>
+        <Text style={styles.sourceLabel}>
+          {playbackContext?.label?.toUpperCase() || ""}
+        </Text>
+        <IconButton
+          size={38}
+          radius={13}
+          background={colors.surface3}
+          border="transparent"
+          onPress={() => router.push("/queue")}
+        >
           <QueueGlyph />
         </IconButton>
       </View>
@@ -74,26 +116,59 @@ export default function FullPlayerScreen() {
         </View>
         <Pressable
           onPress={() => toggleLike(track.id)}
-          style={[styles.likeBtn, isLiked && { backgroundColor: 'rgba(239,166,198,0.14)', borderColor: 'rgba(239,166,198,0.3)' }]}
+          style={[
+            styles.likeBtn,
+            isLiked && {
+              backgroundColor: "rgba(239,166,198,0.14)",
+              borderColor: "rgba(239,166,198,0.3)",
+            },
+          ]}
         >
-          <Text style={{ fontSize: 19, color: isLiked ? colors.pink : colors.textDim }}>{isLiked ? '♥' : '♡'}</Text>
+          <Text
+            style={{
+              fontSize: 19,
+              color: isLiked ? colors.pink : colors.textDim,
+            }}
+          >
+            {isLiked ? "♥" : "♡"}
+          </Text>
         </Pressable>
       </View>
 
       <View style={styles.progressZone}>
-        <SeekBar pct={pct} onSeek={(ratio) => seek(Math.round(ratio * durationMs))} />
+        <SeekBar
+          pct={pct}
+          onSeek={(ratio) => seek(Math.round(ratio * durationMs))}
+        />
         <View style={styles.timeRow}>
           <Text style={styles.timeText}>{formatDuration(positionMs)}</Text>
           <Text style={styles.timeText}>{formatDuration(durationMs)}</Text>
         </View>
+        {playbackError ? (
+          <Pressable onPress={retry} style={styles.errorRow}>
+            <Text style={styles.errorText}>{playbackError}</Text>
+            <Text style={styles.retryText}>Retry</Text>
+          </Pressable>
+        ) : isBuffering ? (
+          <Text style={styles.bufferingText}>Buffering…</Text>
+        ) : null}
       </View>
 
-      <View style={[styles.transport, { paddingBottom: Math.max(24, insets.bottom + 10) }]}>
+      <View
+        style={[
+          styles.transport,
+          { paddingBottom: Math.max(24, insets.bottom + 10) },
+        ]}
+      >
         <Pressable onPress={previous} style={styles.sideBtn} hitSlop={8}>
           <PrevGlyph />
         </Pressable>
         <Pressable onPress={toggle} style={styles.playBtn}>
-          {isPlaying ? <PauseBars height={26} width={5} gap={7} /> : <PlayTriangle size={22} color="#0B0B10" />}
+          {isPlaying ? (
+            <PauseBars height={26} width={5} gap={7} />
+          ) : (
+            <PlayTriangle size={22} color="#0B0B10" />
+          )}
         </Pressable>
         <Pressable onPress={next} style={styles.sideBtn} hitSlop={8}>
           <NextGlyph />
@@ -109,49 +184,49 @@ const styles = StyleSheet.create({
     backgroundColor: colors.bg,
   },
   ambient: {
-    position: 'absolute',
-    left: '-30%',
-    right: '-30%',
+    position: "absolute",
+    left: "-30%",
+    right: "-30%",
     top: 0,
-    height: '45%',
+    height: "45%",
     opacity: 0.35,
   },
   topBar: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
     paddingHorizontal: 18,
     paddingBottom: 8,
   },
   sourceLabel: {
-    fontFamily: 'Manrope_700Bold',
+    fontFamily: "Manrope_700Bold",
     fontSize: 9.5,
     letterSpacing: 1.9,
     color: colors.textDim,
   },
   artZone: {
     flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
+    alignItems: "center",
+    justifyContent: "center",
     paddingHorizontal: 30,
   },
   titleRow: {
-    flexDirection: 'row',
-    alignItems: 'flex-end',
+    flexDirection: "row",
+    alignItems: "flex-end",
     gap: 14,
     paddingHorizontal: 26,
     paddingTop: 22,
     paddingBottom: 8,
   },
   title: {
-    fontFamily: 'SpaceGrotesk_600SemiBold',
+    fontFamily: "SpaceGrotesk_600SemiBold",
     fontSize: 25,
     lineHeight: 29,
     letterSpacing: -0.5,
     color: colors.text,
   },
   artist: {
-    fontFamily: 'Manrope_500Medium',
+    fontFamily: "Manrope_500Medium",
     fontSize: 13.5,
     color: colors.textDim,
     marginTop: 8,
@@ -163,43 +238,67 @@ const styles = StyleSheet.create({
     backgroundColor: colors.surface3,
     borderWidth: 1,
     borderColor: colors.hairline,
-    alignItems: 'center',
-    justifyContent: 'center',
+    alignItems: "center",
+    justifyContent: "center",
   },
   progressZone: {
     paddingHorizontal: 26,
     paddingTop: 16,
   },
   timeRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
+    flexDirection: "row",
+    justifyContent: "space-between",
     marginTop: 6,
   },
   timeText: {
-    fontFamily: 'Manrope_500Medium',
+    fontFamily: "Manrope_500Medium",
+    fontSize: 11,
+    color: colors.textMute,
+  },
+  errorRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+    marginTop: 10,
+  },
+  errorText: {
+    flex: 1,
+    fontFamily: "Manrope_500Medium",
+    fontSize: 11,
+    color: colors.textMute,
+  },
+  retryText: {
+    fontFamily: "Manrope_700Bold",
+    fontSize: 11,
+    color: colors.violet,
+  },
+  bufferingText: {
+    marginTop: 10,
+    fontFamily: "Manrope_500Medium",
     fontSize: 11,
     color: colors.textMute,
   },
   transport: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
     gap: 34,
     paddingTop: 24,
   },
   sideBtn: {
     width: 48,
     height: 48,
-    alignItems: 'center',
-    justifyContent: 'center',
+    alignItems: "center",
+    justifyContent: "center",
   },
   playBtn: {
     width: 76,
     height: 76,
     borderRadius: 38,
     backgroundColor: colors.white,
-    alignItems: 'center',
-    justifyContent: 'center',
+    alignItems: "center",
+    justifyContent: "center",
     ...shadows.playButton,
   },
 });

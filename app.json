@@ -14,6 +14,7 @@
     },
     "android": {
       "package": "com.auric.player",
+      "permissions": ["android.permission.POST_NOTIFICATIONS"],
       "backgroundColor": "#08080B",
       "adaptiveIcon": {
         "backgroundColor": "#08080B",
@@ -35,6 +36,7 @@
           "enableBackgroundPlayback": true
         }
       ],
+      "./plugins/withAndroidCleartextTraffic",
       "expo-secure-store",
       "expo-font",
       "expo-asset"

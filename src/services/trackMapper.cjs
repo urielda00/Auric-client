@@ -1,21 +1,31 @@
 function mapTrackDto(dto) {
-  if (!dto || typeof dto !== 'object' || typeof dto.id !== 'string' || typeof dto.title !== 'string') {
-    throw new Error('Invalid Track response');
+  if (
+    !dto ||
+    typeof dto !== "object" ||
+    typeof dto.id !== "string" ||
+    typeof dto.title !== "string"
+  ) {
+    throw new Error("Invalid Track response");
   }
-  if (!Array.isArray(dto.artists) || dto.artists.some((artist) => typeof artist !== 'string')) {
-    throw new Error('Invalid Track artists response');
+  if (
+    !Array.isArray(dto.artists) ||
+    dto.artists.some((artist) => typeof artist !== "string")
+  ) {
+    throw new Error("Invalid Track artists response");
   }
-  const validNullableString = (value) => value === null || typeof value === 'string';
-  const validNullableNumber = (value) => value === null || (typeof value === 'number' && Number.isFinite(value));
+  const validNullableString = (value) =>
+    value === null || typeof value === "string";
+  const validNullableNumber = (value) =>
+    value === null || (typeof value === "number" && Number.isFinite(value));
   if (
     !validNullableString(dto.version) ||
     !validNullableString(dto.album) ||
     !validNullableString(dto.genre) ||
     !validNullableNumber(dto.release_year) ||
     !validNullableNumber(dto.duration_ms) ||
-    typeof dto.has_media !== 'boolean'
+    typeof dto.has_media !== "boolean"
   ) {
-    throw new Error('Invalid Track metadata response');
+    throw new Error("Invalid Track metadata response");
   }
   return {
     id: dto.id,
@@ -33,7 +43,7 @@ function mapTrackDto(dto) {
 }
 
 function isTrackPlayable(track) {
-  return track?.hasMedia !== false;
+  return track?.hasMedia === true;
 }
 
 module.exports = { isTrackPlayable, mapTrackDto };
