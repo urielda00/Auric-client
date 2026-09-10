@@ -36,10 +36,13 @@ function scoreTrack(track, terms) {
 }
 
 export const searchService = {
-  /** Local, deterministic, case/diacritic-insensitive search across title, artists, aliases. */
-  async search(query) {
+  /** Server-authoritative search with a deterministic local fallback for isolated UI work. */
+  async search(query, options = {}) {
     const q = normalizeSearch(query).trim();
     if (!q) return [];
+    if (musicService.isServerConfigured) {
+      return musicService.searchTracks(q, options);
+    }
     const terms = q.split(/\s+/).map((t) => (ALIAS_MAP[t] ? normalizeSearch(ALIAS_MAP[t]) : t));
     const tracks = await musicService.getAllTracks();
     return tracks

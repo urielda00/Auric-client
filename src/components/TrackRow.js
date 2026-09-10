@@ -21,12 +21,18 @@ export default function TrackRow({
   onToggleLike,
   onPlayNext,
   showNextPill = false,
+  unavailable = false,
 }) {
-  const displaySubtitle = subtitle ?? joinArtists(track.artists);
+  const displaySubtitle = unavailable ? `${joinArtists(track.artists)} · Unavailable` : (subtitle ?? joinArtists(track.artists));
 
   return (
     <View style={styles.row}>
-      <Pressable onPress={onPress} style={({ pressed }) => [styles.main, pressed && styles.pressed]}>
+      <Pressable
+        onPress={onPress}
+        disabled={unavailable}
+        accessibilityState={{ disabled: unavailable }}
+        style={({ pressed }) => [styles.main, unavailable && styles.unavailable, pressed && styles.pressed]}
+      >
         <TrackArt track={track} size={artSize} radius={artRadius} />
         <View style={styles.textCol}>
           <ListTitle color={titleColor}>{trackDisplayTitle(track)}</ListTitle>
@@ -34,7 +40,7 @@ export default function TrackRow({
         </View>
       </Pressable>
 
-      {showNextPill ? (
+      {showNextPill && !unavailable ? (
         <Pressable onPress={onPlayNext} style={({ pressed }) => [styles.nextPill, pressed && styles.pressed]} hitSlop={4}>
           <Text style={styles.nextLabel}>NEXT</Text>
         </Pressable>
@@ -68,6 +74,9 @@ const styles = StyleSheet.create({
   },
   pressed: {
     backgroundColor: 'rgba(255,255,255,0.045)',
+  },
+  unavailable: {
+    opacity: 0.5,
   },
   textCol: {
     flex: 1,

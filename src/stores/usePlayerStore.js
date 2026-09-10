@@ -5,6 +5,8 @@ import { useLibraryStore } from './useLibraryStore';
 import { recommendationService } from '../services/recommendationService';
 import { loadJSON, saveJSON, STORAGE_KEYS } from '../services/storage';
 
+const { isTrackPlayable } = require('../services/trackMapper.cjs');
+
 /**
  * Central player slice. Everything the Mini Player, Full Player and Queue sheet render
  * comes from here; all of them drive playback through `audioEngine` (currently
@@ -76,7 +78,7 @@ export const usePlayerStore = create((set, get) => ({
   /** Plays a specific track. Removes it from the queue if present; queue is otherwise untouched. */
   play(trackId, context) {
     const track = useLibraryStore.getState().getTrackById(trackId);
-    if (!track) return;
+    if (!track || !isTrackPlayable(track)) return;
     useQueueStore.getState().removeId(trackId);
     activate(set, get, track, context || get().playbackContext, { pushCurrentToStack: true });
   },
@@ -192,6 +194,7 @@ export const usePlayerStore = create((set, get) => ({
 }));
 
 function activate(set, get, track, context, { pushCurrentToStack }) {
+  if (!isTrackPlayable(track)) return;
   const prevId = get().currentTrackId;
   audioEngine.load(track);
   audioEngine.play();

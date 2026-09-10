@@ -28,6 +28,15 @@ export const useLibraryStore = create((set, get) => ({
     return get().tracksById[id] || null;
   },
 
+  cacheTracks(tracks) {
+    set((state) => ({
+      tracksById: {
+        ...state.tracksById,
+        ...Object.fromEntries(tracks.map((track) => [track.id, track])),
+      },
+    }));
+  },
+
   isLiked(id) {
     return get().likedIds.includes(id);
   },
