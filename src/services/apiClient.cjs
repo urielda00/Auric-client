@@ -48,6 +48,17 @@ function createApiClient({ baseUrl, timeoutMs = 10000, fetchImpl = globalThis.fe
           });
         }
 
+        if (response.status === 204) {
+          if (!response.ok) {
+            throw new ApiError({
+              code: 'HTTP_ERROR',
+              message: 'The Auric server rejected the request',
+              status: response.status,
+            });
+          }
+          return { data: null };
+        }
+
         let body;
         try {
           body = await response.json();
@@ -92,6 +103,15 @@ function createApiClient({ baseUrl, timeoutMs = 10000, fetchImpl = globalThis.fe
     },
     post(path, body, options = {}) {
       return request('POST', path, { ...options, body });
+    },
+    put(path, body, options = {}) {
+      return request('PUT', path, { ...options, body });
+    },
+    patch(path, body, options = {}) {
+      return request('PATCH', path, { ...options, body });
+    },
+    delete(path, options = {}) {
+      return request('DELETE', path, options);
     },
   };
 }

@@ -1,5 +1,5 @@
-import React, { useMemo } from 'react';
-import { View, Text, Pressable, FlatList, StyleSheet } from 'react-native';
+import React, { useEffect, useMemo } from 'react';
+import { ActivityIndicator, View, Text, Pressable, FlatList, StyleSheet } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
 import ScreenHeader from '../../components/ScreenHeader';
@@ -16,9 +16,15 @@ export default function LikedScreen() {
   const likedIds = useLibraryStore((s) => s.likedIds);
   const tracksById = useLibraryStore((s) => s.tracksById);
   const toggleLike = useLibraryStore((s) => s.toggleLike);
-  const play = usePlayerStore((s) => s.play);
+  const likesStatus = useLibraryStore((s) => s.likesStatus);
+  const likesError = useLibraryStore((s) => s.likesError);
+  const refreshLikes = useLibraryStore((s) => s.refreshLikes);
   const playLikedSongs = usePlayerStore((s) => s.playLikedSongs);
   const shuffleLikedSongs = usePlayerStore((s) => s.shuffleLikedSongs);
+
+  useEffect(() => {
+    refreshLikes();
+  }, [refreshLikes]);
 
   const likedTracks = useMemo(() => likedIds.map((id) => tracksById[id]).filter(Boolean), [likedIds, tracksById]);
   // SafeAreaView only reserves the *top* inset here — the bottom safe area is folded into
@@ -35,6 +41,8 @@ export default function LikedScreen() {
         keyExtractor={(t) => t.id}
         style={styles.list}
         contentContainerStyle={[styles.listContent, { paddingBottom: styles.listContent.paddingBottom + bottomInset }]}
+        refreshing={likesStatus === 'loading'}
+        onRefresh={refreshLikes}
         ListHeaderComponent={
           <>
             <ScreenHeader />
@@ -75,15 +83,31 @@ export default function LikedScreen() {
             track={track}
             titleColor={index === 0 ? colors.pinkLight : colors.text}
             liked
-            onPress={() => play(track.id, { type: 'liked', label: 'Liked Songs' })}
+            onPress={() =>
+              playLikedSongs([
+                track.id,
+                ...likedIds.filter((id) => id !== track.id),
+              ])
+            }
             onToggleLike={() => toggleLike(track.id)}
           />
         )}
-        ListEmptyComponent={
+        ListEmptyComponent={likesStatus === 'loading' ? (
+          <View style={styles.emptyState}>
+            <ActivityIndicator color={colors.violet} />
+          </View>
+        ) : likesStatus === 'error' ? (
+          <View style={styles.emptyState}>
+            <Text style={styles.emptyText}>{likesError?.message || 'Could not load Liked Songs.'}</Text>
+            <Pressable onPress={refreshLikes} style={styles.retryButton}>
+              <Text style={styles.retryLabel}>Retry</Text>
+            </Pressable>
+          </View>
+        ) : (
           <View style={styles.emptyState}>
             <Text style={styles.emptyText}>Nothing liked yet.{'\n'}Tap the heart on any track to build this list.</Text>
           </View>
-        }
+        )}
       />
       <View onLayout={onMiniPlayerLayout}>
         <MiniPlayer />
@@ -197,6 +221,8 @@ const styles = StyleSheet.create({
   emptyState: {
     paddingHorizontal: 24,
     paddingTop: 40,
+    alignItems: 'center',
+    gap: 12,
   },
   emptyText: {
     textAlign: 'center',
@@ -204,5 +230,18 @@ const styles = StyleSheet.create({
     fontSize: 13,
     lineHeight: 21,
     color: colors.textFaint,
+  },
+  retryButton: {
+    paddingHorizontal: 18,
+    paddingVertical: 10,
+    borderRadius: 12,
+    backgroundColor: colors.surface3,
+    borderWidth: 1,
+    borderColor: colors.hairline,
+  },
+  retryLabel: {
+    fontFamily: 'Manrope_700Bold',
+    fontSize: 12,
+    color: colors.text,
   },
 });

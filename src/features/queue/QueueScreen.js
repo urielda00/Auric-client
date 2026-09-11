@@ -23,14 +23,16 @@ export default function QueueScreen() {
   const queueIds = useQueueStore((s) => s.ids);
   const move = useQueueStore((s) => s.move);
   const removeAt = useQueueStore((s) => s.removeAt);
+  const getQueueContext = useQueueStore((s) => s.getContext);
   const tracksById = useLibraryStore((s) => s.tracksById);
 
   const current = currentTrackId ? tracksById[currentTrackId] : null;
   const items = useMemo(() => queueIds.map((id) => ({ id, track: tracksById[id] })).filter((x) => x.track), [queueIds, tracksById]);
 
   const handlePlay = (item, index) => {
+    const context = getQueueContext(item.id);
     removeAt(index);
-    play(item.id, playbackContext);
+    play(item.id, context || playbackContext);
   };
 
   return (

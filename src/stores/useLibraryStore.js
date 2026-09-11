@@ -3,71 +3,177 @@ import { musicService } from '../services/musicService';
 import { likesService } from '../services/likesService';
 import { historyService } from '../services/historyService';
 
-/**
- * Library slice: the track catalogue, likes, and listening history. Screens read tracks
- * and liked/history state from here rather than importing services or mocks directly.
- */
-export const useLibraryStore = create((set, get) => ({
-  tracks: [],
-  tracksById: {},
-  likedIds: [],
-  history: [],
-  hydrated: false,
+const {
+  createLikeMutationCoordinator,
+} = require('../services/likeMutation.cjs');
 
-  async hydrate() {
-    const [tracks, likedIds, history] = await Promise.all([
-      musicService.getAllTracks(),
-      likesService.getLikedIds(),
-      historyService.getEntries(),
-    ]);
-    const tracksById = Object.fromEntries(tracks.map((t) => [t.id, t]));
-    set({ tracks, tracksById, likedIds, history, hydrated: true });
-  },
+/** Canonical client cache for library Tracks, likes, and product History. */
+export const useLibraryStore = create((set, get) => {
+  let likesRequestVersion = 0;
+  let historyRequestVersion = 0;
 
-  getTrackById(id) {
-    return get().tracksById[id] || null;
-  },
-
-  cacheTracks(tracks) {
+  const cacheActivityTracks = (items) => {
+    const tracks = items.map((item) => item.track).filter(Boolean);
+    if (!tracks.length) return;
     set((state) => ({
       tracksById: {
         ...state.tracksById,
         ...Object.fromEntries(tracks.map((track) => [track.id, track])),
       },
     }));
-  },
+  };
 
-  isLiked(id) {
-    return get().likedIds.includes(id);
-  },
+  const likeMutations = createLikeMutationCoordinator({
+    getLikedIds: () => get().likedIds,
+    setLikedIds: (likedIds) => set({ likedIds }),
+    mutate: (trackId, liked) => likesService.setLiked(trackId, liked),
+    onPending: (trackId, isPending) =>
+      set((state) => ({
+        likePendingIds: isPending
+          ? [...state.likePendingIds, trackId]
+          : state.likePendingIds.filter((id) => id !== trackId),
+      })),
+  });
 
-  async toggleLike(id) {
-    const { likedIds } = get();
-    const liked = likedIds.includes(id);
-    const next = liked ? await likesService.unlike(id) : await likesService.like(id);
-    set({ likedIds: next });
-  },
+  return {
+    tracks: [],
+    tracksById: {},
+    likedIds: [],
+    likePendingIds: [],
+    likesStatus: 'idle',
+    likesError: null,
+    history: [],
+    historyStatus: 'idle',
+    historyError: null,
+    historyNextCursor: null,
+    hydrated: false,
 
-  /** Appends a play event to history — called by the player whenever a track starts. */
-  async recordPlay(trackId) {
-    const next = await historyService.recordPlay(trackId);
-    set({ history: next });
-  },
+    async hydrate() {
+      const tracks = await musicService.getAllTracks();
+      set({
+        tracks,
+        tracksById: Object.fromEntries(tracks.map((track) => [track.id, track])),
+      });
+      await Promise.all([get().refreshLikes(), get().refreshHistory()]);
+      set({ hydrated: true });
+    },
 
-  async clearHistory() {
-    const next = await historyService.clear();
-    set({ history: next });
-  },
+    getTrackById(id) {
+      return get().tracksById[id] || null;
+    },
 
-  /** Used by Add Music once the mock pipeline reaches "Ready". */
-  async addTrack(input) {
-    const track = await musicService.addTrack(input);
-    set((state) => ({
-      tracks: [track, ...state.tracks],
-      tracksById: { ...state.tracksById, [track.id]: track },
-    }));
-    return track;
-  },
-}));
+    cacheTracks(tracks) {
+      set((state) => ({
+        tracksById: {
+          ...state.tracksById,
+          ...Object.fromEntries(tracks.map((track) => [track.id, track])),
+        },
+      }));
+    },
+
+    isLiked(id) {
+      return get().likedIds.includes(id);
+    },
+
+    async refreshLikes() {
+      const requestVersion = ++likesRequestVersion;
+      set({ likesStatus: 'loading', likesError: null });
+      try {
+        const items = await likesService.getLikedTracks();
+        if (requestVersion !== likesRequestVersion) return;
+        cacheActivityTracks(items);
+        set({
+          likedIds: items.map(({ track }) => track.id),
+          likesStatus: 'success',
+        });
+      } catch (error) {
+        if (requestVersion === likesRequestVersion) {
+          set({ likesStatus: 'error', likesError: error });
+        }
+      }
+    },
+
+    async toggleLike(id) {
+      likesRequestVersion += 1;
+      set({ likesError: null, likesStatus: 'success' });
+      try {
+        await likeMutations.toggle(id);
+        return true;
+      } catch (error) {
+        set({ likesError: error, likesStatus: 'error' });
+        return false;
+      }
+    },
+
+    async refreshHistory() {
+      const requestVersion = ++historyRequestVersion;
+      set({ historyStatus: 'loading', historyError: null });
+      try {
+        const page = await historyService.getPage({ limit: 50 });
+        if (requestVersion !== historyRequestVersion) return;
+        cacheActivityTracks(page.items);
+        set({
+          history: page.items,
+          historyNextCursor: page.nextCursor,
+          historyStatus: 'success',
+        });
+      } catch (error) {
+        if (requestVersion === historyRequestVersion) {
+          set({ historyStatus: 'error', historyError: error });
+        }
+      }
+    },
+
+    async loadMoreHistory() {
+      const { historyNextCursor, historyStatus } = get();
+      if (!historyNextCursor || historyStatus === 'loadingMore') return;
+      const requestVersion = ++historyRequestVersion;
+      set({ historyStatus: 'loadingMore', historyError: null });
+      try {
+        const page = await historyService.getPage({
+          cursor: historyNextCursor,
+          limit: 50,
+        });
+        if (requestVersion !== historyRequestVersion) return;
+        cacheActivityTracks(page.items);
+        set((state) => ({
+          history: [
+            ...state.history,
+            ...page.items.filter(
+              (item) =>
+                !state.history.some((current) => current.id === item.id),
+            ),
+          ],
+          historyNextCursor: page.nextCursor,
+          historyStatus: 'success',
+        }));
+      } catch (error) {
+        if (requestVersion === historyRequestVersion) {
+          set({ historyStatus: 'error', historyError: error });
+        }
+      }
+    },
+
+    /** Mock mode appends locally; server mode derives History from sessions. */
+    async recordPlay(trackId) {
+      const next = await historyService.recordPlay(trackId);
+      if (!historyService.isServerBacked) set({ history: next });
+    },
+
+    async clearHistory() {
+      const next = await historyService.clear();
+      if (!historyService.isServerBacked) set({ history: next });
+    },
+
+    async addTrack(input) {
+      const track = await musicService.addTrack(input);
+      set((state) => ({
+        tracks: [track, ...state.tracks],
+        tracksById: { ...state.tracksById, [track.id]: track },
+      }));
+      return track;
+    },
+  };
+});
 
 export default useLibraryStore;

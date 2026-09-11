@@ -1,49 +1,57 @@
 import { create } from 'zustand';
 import { queueService } from '../services/queueService';
 
-/**
- * Queue slice: the "up next" list of track ids. The current track is never a member of
- * this list — playing a track always removes it from here first (mirrors the approved
- * design's queue model exactly).
- */
+const queueContext = (type, label) => ({ type, label });
+
+/** Local upcoming queue with source context retained for each Track. */
 export const useQueueStore = create((set, get) => ({
   ids: [],
+  contexts: {},
   hydrated: false,
 
   async hydrate() {
-    const ids = await queueService.getQueueIds();
-    set({ ids, hydrated: true });
+    const state = await queueService.getQueueState();
+    set({ ...state, hydrated: true });
   },
 
-  _persist(ids) {
-    queueService.setQueueIds(ids);
+  _persist(ids, contexts) {
+    queueService.setQueueState({ ids, contexts });
   },
 
-  setQueue(ids) {
-    set({ ids });
-    get()._persist(ids);
+  setQueue(ids, contexts = {}) {
+    set({ ids, contexts });
+    get()._persist(ids, contexts);
   },
 
-  /** Adds to the very front — "Play Next". */
-  enqueueNext(id) {
-    const ids = [id, ...get().ids.filter((x) => x !== id)];
-    get().setQueue(ids);
+  getContext(id) {
+    return get().contexts[id] || queueContext('manual_queue', 'Queue');
   },
 
-  /** Adds to the end — "Add to queue". */
-  enqueueEnd(id) {
-    const ids = [...get().ids.filter((x) => x !== id), id];
-    get().setQueue(ids);
+  enqueueNext(id, context = queueContext('play_next', 'Play Next')) {
+    const ids = [id, ...get().ids.filter((trackId) => trackId !== id)];
+    const contexts = { ...get().contexts, [id]: context };
+    get().setQueue(ids, contexts);
+  },
+
+  enqueueEnd(id, context = queueContext('manual_queue', 'Queue')) {
+    const ids = [...get().ids.filter((trackId) => trackId !== id), id];
+    const contexts = { ...get().contexts, [id]: context };
+    get().setQueue(ids, contexts);
   },
 
   removeAt(index) {
-    const ids = get().ids.filter((_, i) => i !== index);
-    get().setQueue(ids);
+    const id = get().ids[index];
+    const ids = get().ids.filter((_, itemIndex) => itemIndex !== index);
+    const contexts = { ...get().contexts };
+    if (id) delete contexts[id];
+    get().setQueue(ids, contexts);
   },
 
   removeId(id) {
-    const ids = get().ids.filter((x) => x !== id);
-    get().setQueue(ids);
+    const ids = get().ids.filter((trackId) => trackId !== id);
+    const contexts = { ...get().contexts };
+    delete contexts[id];
+    get().setQueue(ids, contexts);
   },
 
   move(from, to) {
@@ -51,25 +59,32 @@ export const useQueueStore = create((set, get) => ({
     if (from < 0 || from >= ids.length || to < 0 || to >= ids.length) return;
     const [moved] = ids.splice(from, 1);
     ids.splice(to, 0, moved);
-    get().setQueue(ids);
+    get().setQueue(ids, get().contexts);
   },
 
-  /** Pops the head of the queue (used by the player when a track ends/skips). */
+  shiftEntry() {
+    const [id, ...ids] = get().ids;
+    if (!id) return null;
+    const context = get().getContext(id);
+    const contexts = { ...get().contexts };
+    delete contexts[id];
+    get().setQueue(ids, contexts);
+    return { id, context };
+  },
+
   shift() {
-    const ids = get().ids;
-    if (!ids.length) return null;
-    const [head, ...rest] = ids;
-    get().setQueue(rest);
-    return head;
+    return get().shiftEntry()?.id || null;
   },
 
   clear() {
-    get().setQueue([]);
+    get().setQueue([], {});
   },
 
-  /** Replaces the whole queue, e.g. starting Smart Shuffle or Liked Songs playback. */
-  setFrom(ids) {
-    get().setQueue(ids);
+  setFrom(ids, context = queueContext('manual_queue', 'Queue')) {
+    get().setQueue(
+      ids,
+      Object.fromEntries(ids.map((id) => [id, context])),
+    );
   },
 }));
 

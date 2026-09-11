@@ -69,4 +69,5 @@ export const STORAGE_KEYS = {
   shuffleMode: 'shuffleMode',
   recentSearches: 'recentSearches',
   library: 'library',
+  pendingListeningSessions: 'pendingListeningSessions',
 };
