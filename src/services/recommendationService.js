@@ -122,7 +122,8 @@ export const recommendationService = {
       musicService.getAllTracks(),
       likesService.getLikedIds(),
     ]);
-    const weighted = tracks.map((track) => {
+    const excluded = new Set(options.excludeTrackIds || []);
+    const weighted = tracks.filter((track) => !excluded.has(track.id)).map((track) => {
       let weight = (track.playWeight || 0.05) * 3;
       if (likedIds.includes(track.id)) weight *= 2;
       if (track.lastPlayedDaysAgo == null || track.lastPlayedDaysAgo >= 90) {
@@ -135,7 +136,11 @@ export const recommendationService = {
 
   async getRandomShuffleQueue(count = 30, options = {}) {
     if (remote) return (await remote.random({ count, ...options })).tracks;
-    return seededShuffle(await musicService.getAllTracks(), Date.now()).slice(
+    const excluded = new Set(options.excludeTrackIds || []);
+    const tracks = (await musicService.getAllTracks()).filter(
+      (track) => !excluded.has(track.id),
+    );
+    return seededShuffle(tracks, Date.now()).slice(
       0,
       count,
     );

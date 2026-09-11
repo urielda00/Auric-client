@@ -18,7 +18,7 @@ export default function QueueScreen() {
   const insets = useSafeAreaInsets();
   const currentTrackId = usePlayerStore((s) => s.currentTrackId);
   const isPlaying = usePlayerStore((s) => s.isPlaying);
-  const play = usePlayerStore((s) => s.play);
+  const playQueued = usePlayerStore((s) => s.playQueued);
   const playbackContext = usePlayerStore((s) => s.playbackContext);
   const queueEntries = useQueueStore((s) => s.entries);
   const move = useQueueStore((s) => s.move);
@@ -40,8 +40,8 @@ export default function QueueScreen() {
   );
 
   const handlePlay = (item, index) => {
-    removeAt(index, { persist: false });
-    play(item.trackId, item.context || playbackContext, item.id);
+    removeAt(index, { persist: false, refill: false });
+    playQueued(item.trackId, item.context || playbackContext, item.id);
   };
 
   return (

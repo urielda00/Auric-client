@@ -5,6 +5,9 @@ import TrackRow from "../../components/TrackRow";
 import { SectionHeader, Eyebrow } from "../../components/Typography";
 import { colors, shadows } from "../../constants/theme";
 import { trackDisplayTitle, joinArtists } from "../../utils/format";
+import { useTrackActions } from "../../components/TrackActionsMenu";
+
+const { createExclusivePressHandlers } = require("../../services/pressInteraction.cjs");
 
 /**
  * Quick Picks: a horizontal carousel of 4 "reason" cards, then a handful of compact rows.
@@ -19,6 +22,7 @@ export default function QuickPicksSection({
   onPlay,
   onToggleLike,
 }) {
+  const { openTrackActions } = useTrackActions();
   return (
     <View>
       <View style={styles.headerRow}>
@@ -48,12 +52,24 @@ export default function QuickPicksSection({
           contentContainerStyle={styles.carousel}
           decelerationRate="fast"
         >
-          {picks.cards.map(({ track, label, color }) => (
-            <Pressable
-              key={track.id}
-              onPress={() => onPlay(track, "Quick Picks")}
-              style={styles.card}
-            >
+          {picks.cards.map(({ track, label, color }) => {
+            const handlers = createExclusivePressHandlers({
+              onPress: () => onPlay(track, "Quick Picks"),
+              onLongPress: () => openTrackActions(track),
+            });
+            return (
+              <Pressable
+                key={track.id}
+                disabled={track.hasMedia === false}
+                onPressIn={handlers.onPressIn}
+                onLongPress={handlers.onLongPress}
+                onPress={handlers.onPress}
+                delayLongPress={420}
+                style={[
+                  styles.card,
+                  track.hasMedia === false && styles.unavailable,
+                ]}
+              >
               <View style={styles.artWrap}>
                 <TrackArt track={track} size={150} radius={22} letter />
                 <View style={styles.reasonChip}>
@@ -66,8 +82,9 @@ export default function QuickPicksSection({
               <Text style={styles.cardArtist} numberOfLines={1}>
                 {joinArtists(track.artists)}
               </Text>
-            </Pressable>
-          ))}
+              </Pressable>
+            );
+          })}
         </ScrollView>
       ) : null}
 
@@ -79,6 +96,7 @@ export default function QuickPicksSection({
               track={track}
               subtitle={`${joinArtists(track.artists)} · ${label}`}
               liked={likedIds.includes(track.id)}
+              unavailable={track.hasMedia === false}
               onPress={() => onPlay(track, "Quick Picks")}
               onToggleLike={() => onToggleLike(track.id)}
             />
@@ -105,6 +123,7 @@ const styles = StyleSheet.create({
   card: {
     width: 150,
   },
+  unavailable: { opacity: 0.5 },
   artWrap: {
     width: 150,
     height: 150,

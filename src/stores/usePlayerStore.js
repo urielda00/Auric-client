@@ -1,6 +1,10 @@
 import { create } from "zustand";
 import { audioEngine } from "../services/audio";
-import { setQueuePersistenceHandler, useQueueStore } from "./useQueueStore";
+import {
+  setQueueMutationHandler,
+  setQueuePersistenceHandler,
+  useQueueStore,
+} from "./useQueueStore";
 import { useLibraryStore } from "./useLibraryStore";
 import { recommendationService } from "../services/recommendationService";
 import { loadJSON, saveJSON, STORAGE_KEYS } from "../services/storage";
@@ -30,6 +34,12 @@ const {
 const {
   prepareRecommendationPlayback,
 } = require("../services/recommendationPlayback.cjs");
+const {
+  DEFAULT_QUEUE_TARGET,
+  createQueueRefillCoordinator,
+  startDirectPlayback,
+  takeNextWithEmergency,
+} = require("../services/playbackQueuePolicy.cjs");
 
 const CHECKPOINT_INTERVAL_MS = 15000;
 const RESTART_THRESHOLD_MS = 4000;
@@ -38,6 +48,7 @@ const PLAYED_STACK_LIMIT = 50;
 const checkpointGate = createCheckpointGate(CHECKPOINT_INTERVAL_MS);
 let activationSequence = 0;
 const recommendationRequests = createRecommendationRequestCoordinator();
+let queueRefillCoordinator = null;
 
 function contextFor(type, label) {
   return { type, label };
@@ -84,6 +95,9 @@ export const usePlayerStore = create((set, get) => ({
     setQueuePersistenceHandler(() => {
       void persistPlaybackState(get(), "replace");
     });
+    setQueueMutationHandler(() => {
+      void get().ensureQueueDepth();
+    });
     playbackStateService.setConflictHandler((snapshot) =>
       applyRestoredSnapshot(set, get, snapshot),
     );
@@ -126,6 +140,7 @@ export const usePlayerStore = create((set, get) => ({
       await applyRestoredSnapshot(set, get, restored.snapshot);
     }
     set({ hydrated: true, isPlaying: false });
+    void get().ensureQueueDepth();
   },
 
   getCurrentTrack() {
@@ -139,20 +154,45 @@ export const usePlayerStore = create((set, get) => ({
     const track = useLibraryStore.getState().getTrackById(trackId);
     if (!track || !isTrackPlayable(track)) return;
     recommendationRequests.invalidate();
-    set({ shufflePending: null, shuffleError: null });
+    getQueueRefillCoordinator().invalidate({ refillAfterPending: true });
+    set({ shuffleMode: null, shufflePending: null, shuffleError: null });
     playbackStateService.markLocalChange();
-    useQueueStore.getState().removeId(trackId, { persist: false });
-    await activate(
+    return startDirectPlayback({
+      resetQueue: () =>
+        useQueueStore.getState().clear({ persist: false, refill: false }),
+      activate: () =>
+        activate(
+          set,
+          get,
+          track,
+          context || contextFor("direct", "Library"),
+          {
+            pushCurrentToStack: true,
+            endPreviousReason: "replaced",
+            currentItemId: queueItemId,
+          },
+        ),
+      refill: () => get().ensureQueueDepth(),
+    });
+  },
+
+  async playQueued(trackId, context, queueItemId) {
+    const track = useLibraryStore.getState().getTrackById(trackId);
+    if (!track || !isTrackPlayable(track)) return false;
+    playbackStateService.markLocalChange();
+    const activated = await activate(
       set,
       get,
       track,
-      context || contextFor("direct", "Library"),
+      context || contextFor("manual_queue", "Queue"),
       {
         pushCurrentToStack: true,
         endPreviousReason: "replaced",
         currentItemId: queueItemId,
       },
     );
+    void get().ensureQueueDepth();
+    return activated;
   },
 
   async toggle() {
@@ -224,6 +264,7 @@ export const usePlayerStore = create((set, get) => ({
         .getState()
         .enqueueNext(currentTrackId, get().playbackContext, {
           persist: false,
+          refill: false,
           itemId: currentItemId,
         });
     }
@@ -241,15 +282,21 @@ export const usePlayerStore = create((set, get) => ({
     }
     let queuedContext = null;
     let queuedItemId = null;
-    const track = takeNextPlayable({
+    const takeQueuedTrack = () => takeNextPlayable({
       shift: () => {
-        const entry = useQueueStore.getState().shiftEntry({ persist: false });
+        const entry = useQueueStore
+          .getState()
+          .shiftEntry({ persist: false, refill: false });
         queuedContext = entry?.context || null;
         queuedItemId = entry?.itemId || null;
         return entry?.id || null;
       },
       getTrack: (id) => useLibraryStore.getState().getTrackById(id),
       isPlayable: isTrackPlayable,
+    });
+    const track = await takeNextWithEmergency({
+      takeNext: takeQueuedTrack,
+      emergencyRefill: () => get().ensureQueueDepth({ emergency: true, force: true }),
     });
     if (track) {
       await activate(
@@ -263,6 +310,7 @@ export const usePlayerStore = create((set, get) => ({
           currentItemId: queuedItemId,
         },
       );
+      void get().ensureQueueDepth();
       return;
     }
     try {
@@ -283,6 +331,8 @@ export const usePlayerStore = create((set, get) => ({
   },
 
   async playLikedSongs(likedTrackIds) {
+    recommendationRequests.invalidate();
+    getQueueRefillCoordinator().invalidate();
     const playable = likedTrackIds.filter((id) =>
       isTrackPlayable(useLibraryStore.getState().getTrackById(id)),
     );
@@ -290,15 +340,23 @@ export const usePlayerStore = create((set, get) => ({
     const [first, ...rest] = playable;
     const track = useLibraryStore.getState().getTrackById(first);
     const context = contextFor("liked_songs", "Liked Songs");
-    useQueueStore.getState().setFrom(rest, context, { persist: false });
+    useQueueStore
+      .getState()
+      .setFrom(rest.slice(0, DEFAULT_QUEUE_TARGET - 1), context, {
+        persist: false,
+        refill: false,
+      });
     set({ shuffleMode: null });
     await activate(set, get, track, context, {
       pushCurrentToStack: true,
       endPreviousReason: "replaced",
     });
+    void get().ensureQueueDepth();
   },
 
   async shuffleLikedSongs(likedTrackIds) {
+    recommendationRequests.invalidate();
+    getQueueRefillCoordinator().invalidate();
     const shuffled = likedTrackIds
       .filter((id) =>
         isTrackPlayable(useLibraryStore.getState().getTrackById(id)),
@@ -308,12 +366,18 @@ export const usePlayerStore = create((set, get) => ({
     const [first, ...rest] = shuffled;
     const track = useLibraryStore.getState().getTrackById(first);
     const context = contextFor("liked_songs", "Liked Songs · Shuffle");
-    useQueueStore.getState().setFrom(rest, context, { persist: false });
+    useQueueStore
+      .getState()
+      .setFrom(rest.slice(0, DEFAULT_QUEUE_TARGET - 1), context, {
+        persist: false,
+        refill: false,
+      });
     set({ shuffleMode: null });
     await activate(set, get, track, context, {
       pushCurrentToStack: true,
       endPreviousReason: "replaced",
     });
+    void get().ensureQueueDepth();
   },
 
   async retry() {
@@ -330,6 +394,10 @@ export const usePlayerStore = create((set, get) => ({
     await persistPlaybackState(get(), "replace");
     await playbackStateService.flush();
   },
+
+  ensureQueueDepth(options) {
+    return getQueueRefillCoordinator().refill(options);
+  },
 }));
 
 async function activate(
@@ -339,7 +407,7 @@ async function activate(
   context,
   { pushCurrentToStack, endPreviousReason, currentItemId },
 ) {
-  if (!isTrackPlayable(track)) return;
+  if (!isTrackPlayable(track)) return false;
   const operation = ++activationSequence;
   const prevId = get().currentTrackId;
   if (prevId && endPreviousReason) {
@@ -374,10 +442,11 @@ async function activate(
   void persistPlaybackState(get(), "replace");
   try {
     await audioEngine.load(track);
-    if (operation !== activationSequence) return;
+    if (operation !== activationSequence) return false;
     await audioEngine.play();
-    if (operation !== activationSequence) return;
+    if (operation !== activationSequence) return false;
     checkpointGate.reset(Date.now());
+    return true;
   } catch {
     if (operation === activationSequence) {
       set({
@@ -388,6 +457,7 @@ async function activate(
       });
       void persistPlaybackState(get(), "replace");
     }
+    return false;
   }
 }
 
@@ -423,7 +493,7 @@ async function persistPlaybackState(state, mode) {
 
 async function applyRestoredSnapshot(set, get, snapshot) {
   activationSequence += 1;
-  return restorePlaybackSnapshot({
+  const restored = await restorePlaybackSnapshot({
     snapshot,
     getTrack: (id) => useLibraryStore.getState().getTrackById(id),
     cacheTracks: (tracks) => useLibraryStore.getState().cacheTracks(tracks),
@@ -435,9 +505,12 @@ async function applyRestoredSnapshot(set, get, snapshot) {
     normalizePosition: normalizeRestoredPosition,
     playbackFailureMessage,
   });
+  void get().ensureQueueDepth();
+  return restored;
 }
 
 async function startRecommendation(set, get, mode) {
+  getQueueRefillCoordinator().invalidate();
   const token = recommendationRequests.begin(mode);
   if (!token) return false;
   set({ shufflePending: mode, shuffleError: null });
@@ -451,7 +524,13 @@ async function startRecommendation(set, get, mode) {
       mode === "smart"
         ? recommendationService.getSmartShuffleQueue(30, { excludeTrackIds })
         : recommendationService.getRandomShuffleQueue(30);
-    const batch = (await request).filter(isTrackPlayable);
+    const batch = (await request)
+      .filter(isTrackPlayable)
+      .filter(
+        (track, index, tracks) =>
+          tracks.findIndex((candidate) => candidate.id === track.id) === index,
+      )
+      .slice(0, DEFAULT_QUEUE_TARGET);
     if (!recommendationRequests.isCurrent(token)) return false;
     if (!batch.length) {
       recommendationRequests.finish(token);
@@ -467,7 +546,7 @@ async function startRecommendation(set, get, mode) {
     useQueueStore.getState().setFrom(
       upcoming.map((track) => track.id),
       context,
-      { persist: false },
+      { persist: false, refill: false },
     );
     set({ shuffleMode: mode, shufflePending: null, shuffleError: null });
     recommendationRequests.finish(token);
@@ -475,6 +554,7 @@ async function startRecommendation(set, get, mode) {
       pushCurrentToStack: true,
       endPreviousReason: "replaced",
     });
+    void get().ensureQueueDepth();
     return true;
   } catch {
     if (recommendationRequests.isCurrent(token)) {
@@ -487,6 +567,36 @@ async function startRecommendation(set, get, mode) {
     }
     return false;
   }
+}
+
+function getQueueRefillCoordinator() {
+  if (queueRefillCoordinator) return queueRefillCoordinator;
+  queueRefillCoordinator = createQueueRefillCoordinator({
+    getQueueEntries: () => useQueueStore.getState().entries,
+    getCurrentTrackId: () => usePlayerStore.getState().currentTrackId,
+    getRecentTrackIds: () => usePlayerStore.getState().playedStack,
+    getMode: () => usePlayerStore.getState().shuffleMode,
+    requestSmart: (count, options) =>
+      recommendationService.getSmartShuffleQueue(count, options),
+    requestRandom: (count, options) =>
+      recommendationService.getRandomShuffleQueue(count, options),
+    cacheTracks: (tracks) => useLibraryStore.getState().cacheTracks(tracks),
+    appendTracks: (tracks, mode) => {
+      const context =
+        mode === "random"
+          ? contextFor("random_shuffle", "Random Shuffle")
+          : contextFor("smart_shuffle", "Smart Shuffle");
+      useQueueStore
+        .getState()
+        .appendUnique(
+          tracks.map((track) => track.id),
+          context,
+          { refill: false },
+        );
+    },
+    isPlayable: isTrackPlayable,
+  });
+  return queueRefillCoordinator;
 }
 
 export default usePlayerStore;

@@ -66,6 +66,23 @@ test("Smart and Random request separate server capabilities", async () => {
   assert.equal(calls[1][0], "/api/v1/recommendations/random");
 });
 
+test("recommendation responses defensively remove duplicate Track IDs", async () => {
+  const api = createRecommendationApi({
+    async post() {
+      return {
+        data: {
+          algorithm_version: "behavior-v1",
+          generated_at_ms: 1,
+          seed: null,
+          tracks: [TRACK, TRACK],
+        },
+      };
+    },
+  });
+  const result = await api.smartShuffle({ count: 30 });
+  assert.deepEqual(result.tracks.map((track) => track.id), [TRACK.id]);
+});
+
 test("request generations suppress duplicate presses, cross-mode races, and manual invalidation", () => {
   const coordinator = createRecommendationRequestCoordinator();
   const smart = coordinator.begin("smart");

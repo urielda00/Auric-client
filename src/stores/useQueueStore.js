@@ -2,11 +2,21 @@ import { create } from "zustand";
 import { queueService } from "../services/queueService";
 import { generateUuid } from "../utils/id";
 
+const {
+  appendUniqueEntries,
+  moveTrackToFront,
+} = require("../services/playbackQueuePolicy.cjs");
+
 const queueContext = (type, label) => ({ type, label });
 let persistenceHandler = null;
+let mutationHandler = null;
 
 export function setQueuePersistenceHandler(handler) {
   persistenceHandler = handler;
+}
+
+export function setQueueMutationHandler(handler) {
+  mutationHandler = handler;
 }
 
 function entry(trackId, context, id = generateUuid()) {
@@ -52,11 +62,12 @@ export const useQueueStore = create((set, get) => ({
     set({ ...derived(entries), hydrated: true });
   },
 
-  _commit(entries, { persist = true } = {}) {
+  _commit(entries, { persist = true, refill = true } = {}) {
     const state = derived(entries);
     set(state);
     queueService.setQueueState({ ids: state.ids, contexts: state.contexts });
     if (persist) persistenceHandler?.();
+    if (refill) mutationHandler?.();
   },
 
   setQueue(ids, contexts = {}, options) {
@@ -83,10 +94,10 @@ export const useQueueStore = create((set, get) => ({
     context = queueContext("play_next", "Play Next"),
     options,
   ) {
-    const entries = [
+    const entries = moveTrackToFront(
+      get().entries,
       entry(trackId, context, options?.itemId),
-      ...get().entries.filter((item) => item.trackId !== trackId),
-    ];
+    );
     get()._commit(entries, options);
   },
 
@@ -100,6 +111,15 @@ export const useQueueStore = create((set, get) => ({
       entry(trackId, context),
     ];
     get()._commit(entries, options);
+  },
+
+  appendUnique(
+    trackIds,
+    context = queueContext("manual_queue", "Queue"),
+    options,
+  ) {
+    const additions = trackIds.map((trackId) => entry(trackId, context));
+    get()._commit(appendUniqueEntries(get().entries, additions), options);
   },
 
   removeAt(index, options) {

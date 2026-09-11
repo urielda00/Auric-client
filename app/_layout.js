@@ -21,6 +21,7 @@ import { useAuthSession } from "../src/hooks/useAuthSession";
 import { usePersistOnBackground } from "../src/hooks/usePersistOnBackground";
 import { colors } from "../src/constants/theme";
 import { PairingScreen } from "../src/features/pairing/PairingScreen";
+import { TrackActionsProvider } from "../src/components/TrackActionsMenu";
 
 export default function RootLayout() {
   const [fontsLoaded] = useFonts({
@@ -58,12 +59,13 @@ export default function RootLayout() {
     <GestureHandlerRootView style={{ flex: 1 }}>
       <SafeAreaProvider>
         <StatusBar style="light" />
-        <Stack
-          screenOptions={{
-            headerShown: false,
-            contentStyle: { backgroundColor: colors.bg },
-          }}
-        >
+        <TrackActionsProvider>
+          <Stack
+            screenOptions={{
+              headerShown: false,
+              contentStyle: { backgroundColor: colors.bg },
+            }}
+          >
           <Stack.Screen name="(tabs)" />
           <Stack.Screen
             name="liked"
@@ -99,7 +101,8 @@ export default function RootLayout() {
               animation: "slide_from_bottom",
             }}
           />
-        </Stack>
+          </Stack>
+        </TrackActionsProvider>
       </SafeAreaProvider>
     </GestureHandlerRootView>
   );

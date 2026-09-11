@@ -34,10 +34,12 @@ function mapGeneratedQueue(value) {
   ) {
     throw new Error("Invalid recommendation queue response");
   }
-  const tracks = value.tracks.map(mapTrackDto);
-  if (new Set(tracks.map((track) => track.id)).size !== tracks.length) {
-    throw new Error("Recommendation queue contains duplicate Tracks");
-  }
+  const tracks = value.tracks
+    .map(mapTrackDto)
+    .filter(
+      (track, index, mapped) =>
+        mapped.findIndex((candidate) => candidate.id === track.id) === index,
+    );
   return {
     algorithmVersion: value.algorithm_version,
     generatedAtMs: value.generated_at_ms,

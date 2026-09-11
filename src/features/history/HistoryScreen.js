@@ -71,6 +71,7 @@ export default function HistoryScreen() {
                   artRadius={13}
                   subtitle={`${entry.when} · ${entry.track.artists.join(', ')}`}
                   liked={likedIds.includes(entry.trackId)}
+                  unavailable={entry.track.hasMedia === false}
                   showNextPill
                   onPress={() => play(entry.trackId, { type: 'history', label: 'History' })}
                   onPlayNext={() => enqueueNext(entry.trackId)}

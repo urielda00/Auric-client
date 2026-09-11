@@ -83,6 +83,7 @@ export default function LikedScreen() {
             track={track}
             titleColor={index === 0 ? colors.pinkLight : colors.text}
             liked
+            unavailable={track.hasMedia === false}
             onPress={() =>
               playLikedSongs([
                 track.id,

@@ -1,9 +1,15 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import { Pressable, View, Text, StyleSheet } from 'react-native';
 import TrackArt from './TrackArt';
 import { ListTitle, ListSubtitle } from './Typography';
 import { colors } from '../constants/theme';
 import { trackDisplayTitle, joinArtists } from '../utils/format';
+import { useTrackActions } from './TrackActionsMenu';
+
+const {
+  canOfferTrackActions,
+  createExclusivePressHandlers,
+} = require('../services/pressInteraction.cjs');
 
 /**
  * The one-line track row reused across Home, Search, Liked Songs and History. Variants are
@@ -18,20 +24,36 @@ export default function TrackRow({
   artRadius = 14,
   liked = false,
   onPress,
+  onLongPress,
   onToggleLike,
   onPlayNext,
   showNextPill = false,
   unavailable = false,
 }) {
-  const displaySubtitle = unavailable ? `${joinArtists(track.artists)} · Unavailable` : (subtitle ?? joinArtists(track.artists));
+  const isUnavailable = unavailable || !canOfferTrackActions(track);
+  const displaySubtitle = isUnavailable ? `${joinArtists(track.artists)} · Unavailable` : (subtitle ?? joinArtists(track.artists));
+
+  const { openTrackActions } = useTrackActions();
+  const pressHandlers = useMemo(
+    () => createExclusivePressHandlers({
+      onPress,
+      onLongPress: isUnavailable
+        ? null
+        : onLongPress || (() => openTrackActions(track)),
+    }),
+    [isUnavailable, onLongPress, onPress, openTrackActions, track],
+  );
 
   return (
     <View style={styles.row}>
       <Pressable
-        onPress={onPress}
-        disabled={unavailable}
-        accessibilityState={{ disabled: unavailable }}
-        style={({ pressed }) => [styles.main, unavailable && styles.unavailable, pressed && styles.pressed]}
+        onPressIn={pressHandlers.onPressIn}
+        onLongPress={isUnavailable ? undefined : pressHandlers.onLongPress}
+        onPress={pressHandlers.onPress}
+        delayLongPress={420}
+        disabled={isUnavailable}
+        accessibilityState={{ disabled: isUnavailable }}
+        style={({ pressed }) => [styles.main, isUnavailable && styles.unavailable, pressed && styles.pressed]}
       >
         <TrackArt track={track} size={artSize} radius={artRadius} />
         <View style={styles.textCol}>
@@ -40,7 +62,7 @@ export default function TrackRow({
         </View>
       </Pressable>
 
-      {showNextPill && !unavailable ? (
+      {showNextPill && !isUnavailable ? (
         <Pressable onPress={onPlayNext} style={({ pressed }) => [styles.nextPill, pressed && styles.pressed]} hitSlop={4}>
           <Text style={styles.nextLabel}>NEXT</Text>
         </Pressable>
