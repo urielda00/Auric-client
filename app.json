@@ -14,7 +14,12 @@
     },
     "android": {
       "package": "com.auric.player",
-      "permissions": ["android.permission.POST_NOTIFICATIONS"],
+      "permissions": [
+        "android.permission.POST_NOTIFICATIONS",
+        "android.permission.MODIFY_AUDIO_SETTINGS",
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"
+      ],
       "backgroundColor": "#08080B",
       "adaptiveIcon": {
         "backgroundColor": "#08080B",
@@ -41,6 +46,12 @@
     ],
     "experiments": {
       "typedRoutes": false
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "04275fa4-9691-4f94-b1e1-5b2de32c3dde"
+      }
     }
   }
 }
