@@ -71,4 +71,6 @@ export const STORAGE_KEYS = {
   library: "library",
   pendingListeningSessions: "pendingListeningSessions",
   playbackSnapshot: "playbackSnapshot",
+  quickPicks: "quickPicks",
+  statsSummary: "statsSummary",
 };

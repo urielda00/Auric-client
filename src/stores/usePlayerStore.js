@@ -24,6 +24,12 @@ const {
 const {
   createCheckpointGate,
 } = require("../services/audio/checkpointPolicy.cjs");
+const {
+  createRecommendationRequestCoordinator,
+} = require("../services/recommendationApi.cjs");
+const {
+  prepareRecommendationPlayback,
+} = require("../services/recommendationPlayback.cjs");
 
 const CHECKPOINT_INTERVAL_MS = 15000;
 const RESTART_THRESHOLD_MS = 4000;
@@ -31,6 +37,7 @@ const PLAYED_STACK_LIMIT = 50;
 
 const checkpointGate = createCheckpointGate(CHECKPOINT_INTERVAL_MS);
 let activationSequence = 0;
+const recommendationRequests = createRecommendationRequestCoordinator();
 
 function contextFor(type, label) {
   return { type, label };
@@ -67,6 +74,8 @@ export const usePlayerStore = create((set, get) => ({
   playbackError: null,
   playbackContext: contextFor("none", ""),
   shuffleMode: null,
+  shufflePending: null,
+  shuffleError: null,
   playedStack: [],
   playedItems: [],
   hydrated: false,
@@ -129,6 +138,8 @@ export const usePlayerStore = create((set, get) => ({
   async play(trackId, context, queueItemId) {
     const track = useLibraryStore.getState().getTrackById(trackId);
     if (!track || !isTrackPlayable(track)) return;
+    recommendationRequests.invalidate();
+    set({ shufflePending: null, shuffleError: null });
     playbackStateService.markLocalChange();
     useQueueStore.getState().removeId(trackId, { persist: false });
     await activate(
@@ -264,41 +275,11 @@ export const usePlayerStore = create((set, get) => ({
   },
 
   async startSmartShuffle() {
-    const batch = (await recommendationService.getSmartShuffleQueue(20)).filter(
-      isTrackPlayable,
-    );
-    if (!batch.length) return;
-    const [first, ...rest] = batch;
-    const context = contextFor("smart_shuffle", "Smart Shuffle");
-    useQueueStore.getState().setFrom(
-      rest.map((track) => track.id),
-      context,
-      { persist: false },
-    );
-    set({ shuffleMode: "smart" });
-    await activate(set, get, first, context, {
-      pushCurrentToStack: true,
-      endPreviousReason: "replaced",
-    });
+    return startRecommendation(set, get, "smart");
   },
 
   async startRandomShuffle() {
-    const batch = (
-      await recommendationService.getRandomShuffleQueue(20)
-    ).filter(isTrackPlayable);
-    if (!batch.length) return;
-    const [first, ...rest] = batch;
-    const context = contextFor("random_shuffle", "Random Shuffle");
-    useQueueStore.getState().setFrom(
-      rest.map((track) => track.id),
-      context,
-      { persist: false },
-    );
-    set({ shuffleMode: "random" });
-    await activate(set, get, first, context, {
-      pushCurrentToStack: true,
-      endPreviousReason: "replaced",
-    });
+    return startRecommendation(set, get, "random");
   },
 
   async playLikedSongs(likedTrackIds) {
@@ -454,6 +435,58 @@ async function applyRestoredSnapshot(set, get, snapshot) {
     normalizePosition: normalizeRestoredPosition,
     playbackFailureMessage,
   });
+}
+
+async function startRecommendation(set, get, mode) {
+  const token = recommendationRequests.begin(mode);
+  if (!token) return false;
+  set({ shufflePending: mode, shuffleError: null });
+  const excludeTrackIds = [
+    get().currentTrackId,
+    ...get().playedStack.slice(-10),
+    ...useQueueStore.getState().ids,
+  ].filter(Boolean);
+  try {
+    const request =
+      mode === "smart"
+        ? recommendationService.getSmartShuffleQueue(30, { excludeTrackIds })
+        : recommendationService.getRandomShuffleQueue(30);
+    const batch = (await request).filter(isTrackPlayable);
+    if (!recommendationRequests.isCurrent(token)) return false;
+    if (!batch.length) {
+      recommendationRequests.finish(token);
+      set({
+        shufflePending: null,
+        shuffleError: "No playable tracks are available for this shuffle.",
+      });
+      return false;
+    }
+    useLibraryStore.getState().cacheTracks(batch);
+    const prepared = prepareRecommendationPlayback(batch, mode);
+    const { first, upcoming, context } = prepared;
+    useQueueStore.getState().setFrom(
+      upcoming.map((track) => track.id),
+      context,
+      { persist: false },
+    );
+    set({ shuffleMode: mode, shufflePending: null, shuffleError: null });
+    recommendationRequests.finish(token);
+    await activate(set, get, first, context, {
+      pushCurrentToStack: true,
+      endPreviousReason: "replaced",
+    });
+    return true;
+  } catch {
+    if (recommendationRequests.isCurrent(token)) {
+      recommendationRequests.finish(token);
+      set({
+        shufflePending: null,
+        shuffleError:
+          "Unable to start a new shuffle. Try again when the server is available.",
+      });
+    }
+    return false;
+  }
 }
 
 export default usePlayerStore;
