@@ -1,5 +1,7 @@
-import React, { useEffect, useMemo } from "react";
+import React, { useCallback, useEffect, useMemo } from "react";
 import { View, Text, Pressable, StyleSheet, Dimensions } from "react-native";
+import { Gesture, GestureDetector } from "react-native-gesture-handler";
+import { runOnJS } from "react-native-reanimated";
 import { useRouter } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import IconButton from "../../components/IconButton";
@@ -22,6 +24,10 @@ import {
   joinArtists,
 } from "../../utils/format";
 import { trackArt } from "../../utils/artwork";
+
+const {
+  createQueueSwipeReleaseHandler,
+} = require("./queueSwipe.cjs");
 
 const { width: SCREEN_WIDTH } = Dimensions.get("window");
 const ART_SIZE = Math.min(SCREEN_WIDTH - 60, 420);
@@ -48,6 +54,21 @@ export default function FullPlayerScreen() {
     currentTrackId ? s.likedIds.includes(currentTrackId) : false,
   );
   const toggleLike = useLibraryStore((s) => s.toggleLike);
+  const openQueue = useCallback(() => router.push("/queue"), [router]);
+  const releaseQueueSwipe = useMemo(
+    () => createQueueSwipeReleaseHandler(openQueue),
+    [openQueue],
+  );
+  const queueSwipe = Gesture.Pan()
+    .activeOffsetY([-12, 12])
+    .failOffsetX([-20, 20])
+    .onEnd((event) => {
+      runOnJS(releaseQueueSwipe)(
+        event.translationX,
+        event.translationY,
+        event.velocityY,
+      );
+    });
 
   const ambient = useMemo(
     () =>
@@ -93,7 +114,7 @@ export default function FullPlayerScreen() {
           radius={13}
           background={colors.surface3}
           border="transparent"
-          onPress={() => router.push("/queue")}
+          onPress={openQueue}
         >
           <QueueGlyph />
         </IconButton>
@@ -153,6 +174,13 @@ export default function FullPlayerScreen() {
           <Text style={styles.bufferingText}>Buffering…</Text>
         ) : null}
       </View>
+
+      <GestureDetector gesture={queueSwipe}>
+        <View style={styles.queuePullZone}>
+          <View style={styles.queuePullHandle} />
+          <Text style={styles.queuePullLabel}>QUEUE</Text>
+        </View>
+      </GestureDetector>
 
       <View
         style={[
@@ -284,7 +312,25 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     gap: 34,
-    paddingTop: 24,
+    paddingTop: 8,
+  },
+  queuePullZone: {
+    height: 38,
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 5,
+  },
+  queuePullHandle: {
+    width: 34,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: "rgba(255,255,255,0.2)",
+  },
+  queuePullLabel: {
+    fontFamily: "Manrope_700Bold",
+    fontSize: 8,
+    letterSpacing: 1.5,
+    color: colors.textFaint,
   },
   sideBtn: {
     width: 48,

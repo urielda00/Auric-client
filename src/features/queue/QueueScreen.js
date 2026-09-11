@@ -1,4 +1,4 @@
-import React, { useMemo } from "react";
+import React, { useMemo, useRef } from "react";
 import { View, Text, Pressable, ScrollView, StyleSheet } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
@@ -6,42 +6,83 @@ import { LinearGradient } from "expo-linear-gradient";
 import TrackArt from "../../components/TrackArt";
 import EqualizerBars from "../../components/EqualizerBars";
 import { Eyebrow } from "../../components/Typography";
+import {
+  PauseBars,
+  PlayTriangle,
+} from "../../components/icons/Glyphs";
 import DraggableQueueList from "./DraggableQueueList";
 import { usePlayerStore } from "../../stores/usePlayerStore";
 import { useQueueStore } from "../../stores/useQueueStore";
 import { useLibraryStore } from "../../stores/useLibraryStore";
 import { colors } from "../../constants/theme";
-import { trackDisplayTitle } from "../../utils/format";
+import { joinArtists, trackDisplayTitle } from "../../utils/format";
+
+const {
+  PLAYED_ROW_HEIGHT,
+  createQueuePlaybackControls,
+  deriveQueueTimeline,
+  getQueueInitialOffset,
+  getUpcomingMutationIndex,
+} = require("./queueTimeline.cjs");
 
 export default function QueueScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const currentTrackId = usePlayerStore((s) => s.currentTrackId);
+  const currentItemId = usePlayerStore((s) => s.currentItemId);
   const isPlaying = usePlayerStore((s) => s.isPlaying);
+  const toggle = usePlayerStore((s) => s.toggle);
   const playQueued = usePlayerStore((s) => s.playQueued);
   const playbackContext = usePlayerStore((s) => s.playbackContext);
+  const playedItems = usePlayerStore((s) => s.playedItems);
   const queueEntries = useQueueStore((s) => s.entries);
   const move = useQueueStore((s) => s.move);
   const removeAt = useQueueStore((s) => s.removeAt);
   const tracksById = useLibraryStore((s) => s.tracksById);
 
-  const current = currentTrackId ? tracksById[currentTrackId] : null;
-  const items = useMemo(
+  const timeline = useMemo(
     () =>
-      queueEntries
-        .map((entry) => ({
-          id: entry.id,
-          trackId: entry.trackId,
-          context: entry.context,
-          track: tracksById[entry.trackId],
-        }))
-        .filter((item) => item.track),
-    [queueEntries, tracksById],
+      deriveQueueTimeline({
+        playedItems,
+        currentTrackId,
+        currentItemId,
+        playbackContext,
+        queueEntries,
+        tracksById,
+      }),
+    [
+      currentItemId,
+      currentTrackId,
+      playbackContext,
+      playedItems,
+      queueEntries,
+      tracksById,
+    ],
   );
+  const controls = useMemo(() => createQueuePlaybackControls(toggle), [toggle]);
+  const initialOffset = useRef({
+    x: 0,
+    y: getQueueInitialOffset(timeline.played.length),
+  });
 
   const handlePlay = (item, index) => {
-    removeAt(index, { persist: false, refill: false });
+    const queueIndex = getUpcomingMutationIndex(timeline.upcoming, index);
+    if (queueIndex < 0) return;
+    removeAt(queueIndex, { persist: false, refill: false });
     playQueued(item.trackId, item.context || playbackContext, item.id);
+  };
+
+  const handleReorder = (from, to) => {
+    const fromQueueIndex = getUpcomingMutationIndex(timeline.upcoming, from);
+    const toQueueIndex = getUpcomingMutationIndex(timeline.upcoming, to);
+    if (fromQueueIndex >= 0 && toQueueIndex >= 0) {
+      move(fromQueueIndex, toQueueIndex);
+    }
+  };
+
+  const handleRemove = (_item, index) => {
+    const queueIndex = getUpcomingMutationIndex(timeline.upcoming, index);
+    if (queueIndex >= 0) removeAt(queueIndex);
   };
 
   return (
@@ -57,68 +98,110 @@ export default function QueueScreen() {
           </Pressable>
         </View>
 
-        {current ? (
-          <View style={styles.nowPlayingWrap}>
-            <LinearGradient
-              colors={["rgba(167,140,240,0.16)", "rgba(90,209,224,0.08)"]}
-              start={{ x: 0, y: 0 }}
-              end={{ x: 1, y: 1 }}
-              style={styles.nowPlayingCard}
+        {timeline.current ? (
+          <View style={styles.playbackHeader}>
+            <TrackArt track={timeline.current.track} size={38} radius={11} />
+            <View style={styles.headerTrackText}>
+              <Text style={styles.headerTrackTitle} numberOfLines={1}>
+                {trackDisplayTitle(timeline.current.track)}
+              </Text>
+              <Text style={styles.headerArtist} numberOfLines={1}>
+                {joinArtists(timeline.current.track.artists)}
+              </Text>
+            </View>
+            <Pressable
+              accessibilityLabel={isPlaying ? "Pause" : "Play"}
+              onPress={controls.togglePlayback}
+              style={styles.headerPlayButton}
+              hitSlop={6}
             >
-              <TrackArt track={current} size={46} radius={14} />
-              <View style={{ flex: 1, minWidth: 0 }}>
-                <Text style={styles.nowTitle} numberOfLines={1}>
-                  {trackDisplayTitle(current)}
-                </Text>
-                <Text style={styles.nowEyebrow}>Now playing</Text>
-              </View>
-              <EqualizerBars
-                bars={3}
-                height={16}
-                width={2.5}
-                gap={3}
-                color={colors.violetLight}
-                active={isPlaying}
-              />
-            </LinearGradient>
+              {isPlaying ? (
+                <PauseBars height={15} width={3} gap={4} color={colors.black} />
+              ) : (
+                <PlayTriangle size={12} color={colors.black} />
+              )}
+            </Pressable>
           </View>
         ) : null}
 
-        <Eyebrow
-          style={{
-            paddingHorizontal: 18,
-            marginBottom: 12,
-            letterSpacing: 1.7,
-          }}
-        >
-          Next up · drag to reorder
-        </Eyebrow>
-
         <ScrollView
-          style={{ flex: 1 }}
+          style={styles.timeline}
+          contentOffset={initialOffset.current}
           contentContainerStyle={[
             styles.listContent,
             { paddingBottom: 24 + insets.bottom },
           ]}
           showsVerticalScrollIndicator={false}
         >
-          {items.length ? (
+          {timeline.played.map((item) => (
+            <PlayedRow key={item.id} item={item} />
+          ))}
+
+          {timeline.current ? (
+            <View style={styles.nowPlayingWrap}>
+              <LinearGradient
+                colors={["rgba(167,140,240,0.16)", "rgba(90,209,224,0.08)"]}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 1, y: 1 }}
+                style={styles.nowPlayingCard}
+              >
+                <TrackArt track={timeline.current.track} size={46} radius={14} />
+                <View style={{ flex: 1, minWidth: 0 }}>
+                  <Text style={styles.nowTitle} numberOfLines={1}>
+                    {trackDisplayTitle(timeline.current.track)}
+                  </Text>
+                  <Text style={styles.nowEyebrow}>Now playing</Text>
+                </View>
+                <EqualizerBars
+                  bars={3}
+                  height={16}
+                  width={2.5}
+                  gap={3}
+                  color={colors.violetLight}
+                  active={isPlaying}
+                />
+              </LinearGradient>
+            </View>
+          ) : null}
+
+          {timeline.upcoming.length ? (
+            <Eyebrow style={styles.nextUpLabel}>
+              Next up · drag to reorder
+            </Eyebrow>
+          ) : null}
+
+          {timeline.upcoming.length ? (
             <DraggableQueueList
-              items={items}
-              onReorder={move}
+              items={timeline.upcoming}
+              onReorder={handleReorder}
               onPlay={handlePlay}
-              onRemove={(item, index) => removeAt(index)}
+              onRemove={handleRemove}
             />
           ) : (
             <Text style={styles.emptyText}>
-              {
-                'Nothing queued. Add tracks with "Play Next" or start a shuffle.'
-              }
+              {'Nothing queued. Add tracks with "Play Next" or start a shuffle.'}
             </Text>
           )}
         </ScrollView>
       </Pressable>
     </Pressable>
+  );
+}
+
+function PlayedRow({ item }) {
+  return (
+    <View pointerEvents="none" style={styles.playedRow}>
+      <TrackArt track={item.track} size={40} radius={12} />
+      <View style={styles.playedText}>
+        <Text style={styles.playedTitle} numberOfLines={1}>
+          {trackDisplayTitle(item.track)}
+        </Text>
+        <Text style={styles.playedArtist} numberOfLines={1}>
+          {joinArtists(item.track.artists)}
+        </Text>
+      </View>
+      <Text style={styles.playedLabel}>PLAYED</Text>
+    </View>
   );
 }
 
@@ -129,7 +212,7 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(4,4,7,0.6)",
   },
   sheet: {
-    height: "78%",
+    height: "92%",
     borderTopLeftRadius: 28,
     borderTopRightRadius: 28,
     backgroundColor: colors.bgSheet,
@@ -153,7 +236,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "space-between",
     paddingHorizontal: 18,
-    paddingVertical: 10,
+    paddingVertical: 8,
   },
   headerTitle: {
     fontFamily: "SpaceGrotesk_600SemiBold",
@@ -168,9 +251,81 @@ const styles = StyleSheet.create({
     color: colors.textDim,
     padding: 8,
   },
-  nowPlayingWrap: {
+  playbackHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    marginHorizontal: 12,
+    marginBottom: 8,
+    padding: 8,
+    borderRadius: 15,
+    backgroundColor: colors.surface2,
+    borderWidth: 1,
+    borderColor: colors.hairline,
+  },
+  headerTrackText: {
+    flex: 1,
+    minWidth: 0,
+  },
+  headerTrackTitle: {
+    fontFamily: "Manrope_600SemiBold",
+    fontSize: 12.5,
+    color: colors.text,
+  },
+  headerArtist: {
+    fontFamily: "Manrope_500Medium",
+    fontSize: 10.5,
+    color: colors.textMute,
+    marginTop: 2,
+  },
+  headerPlayButton: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: colors.white,
+  },
+  timeline: {
+    flex: 1,
+  },
+  listContent: {
     paddingHorizontal: 12,
-    paddingBottom: 14,
+    paddingTop: 4,
+    paddingBottom: 24,
+  },
+  playedRow: {
+    height: PLAYED_ROW_HEIGHT,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 11,
+    paddingHorizontal: 6,
+    opacity: 0.55,
+  },
+  playedText: {
+    flex: 1,
+    minWidth: 0,
+  },
+  playedTitle: {
+    fontFamily: "Manrope_600SemiBold",
+    fontSize: 13,
+    color: colors.text,
+  },
+  playedArtist: {
+    fontFamily: "Manrope_500Medium",
+    fontSize: 11,
+    color: colors.textMute,
+    marginTop: 2.5,
+  },
+  playedLabel: {
+    fontFamily: "Manrope_700Bold",
+    fontSize: 8.5,
+    letterSpacing: 1,
+    color: colors.textFaint,
+    paddingRight: 6,
+  },
+  nowPlayingWrap: {
+    paddingVertical: 8,
   },
   nowPlayingCard: {
     flexDirection: "row",
@@ -194,9 +349,11 @@ const styles = StyleSheet.create({
     color: colors.violetLight,
     marginTop: 5,
   },
-  listContent: {
-    paddingHorizontal: 12,
-    paddingBottom: 24,
+  nextUpLabel: {
+    paddingHorizontal: 6,
+    marginTop: 8,
+    marginBottom: 8,
+    letterSpacing: 1.7,
   },
   emptyText: {
     fontFamily: "Manrope_500Medium",
