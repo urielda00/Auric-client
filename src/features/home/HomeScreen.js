@@ -18,6 +18,7 @@ import SmartShuffleBanner from "./SmartShuffleBanner";
 const {
   createLatestRequestGate,
 } = require("../../services/recommendationApi.cjs");
+const { getLocalGreeting } = require("./getLocalGreeting.cjs");
 
 export default function HomeScreen() {
   const router = useRouter();
@@ -101,15 +102,12 @@ export default function HomeScreen() {
       <AmbientGlow />
       <PullToRefreshScrollView
         onRefresh={handleRefresh}
-        contentContainerStyle={[
-          styles.content,
-          { paddingBottom: styles.content.paddingBottom + bottomInset },
-        ]}
+        contentContainerStyle={{ paddingBottom: bottomInset }}
       >
         <HomeHeader />
         <View style={styles.greetingBlock}>
           <Text style={styles.greeting}>
-            {refreshing ? "Finding something new…" : "Good evening, Uriel."}
+            {refreshing ? "Finding something new…" : getLocalGreeting()}
           </Text>
           <Text style={styles.greetingSub}>
             {stats
@@ -135,23 +133,30 @@ export default function HomeScreen() {
 
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: colors.bg },
-  content: { paddingBottom: 8 },
   greetingBlock: {
     paddingHorizontal: 18,
     paddingTop: 14,
     paddingBottom: 18,
+    alignItems: "flex-start",
+    direction: "ltr",
   },
   greeting: {
+    alignSelf: "stretch",
     fontFamily: "SpaceGrotesk_600SemiBold",
     fontSize: 27,
     lineHeight: 30,
     letterSpacing: -0.4,
     color: colors.text,
+    textAlign: "left",
+    writingDirection: "ltr",
   },
   greetingSub: {
+    alignSelf: "stretch",
     fontFamily: "Manrope_500Medium",
     fontSize: 12.5,
     color: colors.textFaint,
     marginTop: 8,
+    textAlign: "left",
+    writingDirection: "ltr",
   },
 });

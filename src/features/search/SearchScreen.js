@@ -148,7 +148,7 @@ export default function SearchScreen() {
         data={isIdle ? [] : results}
         keyExtractor={(track) => track.id}
         style={styles.list}
-        contentContainerStyle={[styles.listContent, { paddingBottom: styles.listContent.paddingBottom + bottomInset }]}
+        contentContainerStyle={[styles.listContent, { paddingBottom: bottomInset }]}
         keyboardShouldPersistTaps="handled"
         ListHeaderComponent={listHeader}
         renderItem={({ item: track }) => (
@@ -198,7 +198,7 @@ const styles = StyleSheet.create({
     padding: 6,
   },
   list: { flex: 1 },
-  listContent: { paddingHorizontal: 12, paddingBottom: 20 },
+  listContent: { paddingHorizontal: 12 },
   recentsBlock: { paddingHorizontal: 6, paddingTop: 6, paddingBottom: 8 },
   chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   chip: {

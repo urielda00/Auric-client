@@ -1,5 +1,4 @@
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useLayoutMetricsStore } from '../stores/useLayoutMetricsStore';
 
 /**
  * The one place that decides how much bottom clearance a scrollable screen needs so its
@@ -7,10 +6,8 @@ import { useLayoutMetricsStore } from '../stores/useLayoutMetricsStore';
  * because the Mini Player lives in two different places depending on the screen:
  *
  *  - `useTabBarBottomInset` — for screens inside the bottom-tabs navigator (Home, Search).
- *    The custom tab bar renders the Mini Player stacked above the tab row and reports its
- *    own *total* rendered height (Mini Player + tab row + safe area) via onLayout, so this
- *    is the only number needed — it's already 0-vs-nonzero correct depending on whether a
- *    track is loaded.
+ *    The navigator already lays those screens out above the custom tab bar, including its
+ *    Mini Player, so they only need the visual gap.
  *
  *  - `useMiniPlayerBottomInset` — for pushed screens outside the tabs navigator
  *    (Liked, History, Stats, Add Music) that render their own local `<MiniPlayer/>`.
@@ -21,8 +18,7 @@ import { useLayoutMetricsStore } from '../stores/useLayoutMetricsStore';
 export const CONTENT_BOTTOM_GAP = 16;
 
 export function useTabBarBottomInset(extraGap = CONTENT_BOTTOM_GAP) {
-  const tabBarHeight = useLayoutMetricsStore((s) => s.tabBarHeight);
-  return tabBarHeight + extraGap;
+  return extraGap;
 }
 
 export function useMiniPlayerBottomInset(measuredMiniPlayerHeight, extraGap = CONTENT_BOTTOM_GAP) {

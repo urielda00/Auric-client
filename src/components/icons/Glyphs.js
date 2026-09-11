@@ -1,10 +1,10 @@
 import React from 'react';
 import { View, Text } from 'react-native';
+import Svg, { Polygon } from 'react-native-svg';
 
 /**
- * Auric's icon set: no icon font, no SVG assets — every glyph in the approved design is
- * drawn from plain views (borders, rotated bars, CSS-triangle equivalents). Ported 1:1
- * from `Auric Player.dc.html` so icon geometry matches exactly.
+ * Auric's icon set: no icon font or external SVG assets. Glyphs use plain views, with
+ * explicit SVG geometry where Android RTL swapping would change a directional shape.
  */
 
 export function SearchGlyph({ size = 13, color = '#C9C9D6', stroke = 1.7 }) {
@@ -101,19 +101,17 @@ export function HeartGlyph({ filled, size = 15, filledColor = '#EFA6C6', idleCol
 
 export function PlayTriangle({ size = 12, color = '#EDEDF2' }) {
   return (
-    <View
-      style={{
-        width: 0,
-        height: 0,
-        borderTopWidth: size * 0.6,
-        borderBottomWidth: size * 0.6,
-        borderLeftWidth: size,
-        borderTopColor: 'transparent',
-        borderBottomColor: 'transparent',
-        borderLeftColor: color,
-        marginLeft: 2,
-      }}
-    />
+    <Svg
+      width={size}
+      height={size * 1.2}
+      viewBox={`0 0 ${size} ${size * 1.2}`}
+      style={{ marginLeft: 2 }}
+    >
+      <Polygon
+        points={`0,0 ${size},${size * 0.6} 0,${size * 1.2}`}
+        fill={color}
+      />
+    </Svg>
   );
 }
 

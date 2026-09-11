@@ -31,7 +31,6 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: 12,
     paddingHorizontal: 18,
-    paddingBottom: 28,
   },
   tile: {
     flex: 1,
