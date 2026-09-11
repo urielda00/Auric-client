@@ -140,30 +140,51 @@ test("network outages are retryable and do not clear a stored token", async () =
   assert.deepEqual(storage.writes, []);
 });
 
-test("pairing failures do not save a token and stale pairing responses are ignored", async () => {
+test("two near-simultaneous pairing calls send exactly one pair request", async () => {
   const storage = fakeSecureStore();
   const session = createAuthSession({ secureStore: storage });
-  const resolvers = [];
+  let requestCount = 0;
+  let resolveRequest;
   const pairing = createPairingFlow({
     authSession: session,
-    pairRequest: () => new Promise((resolve) => resolvers.push(resolve)),
+    pairRequest: () => {
+      requestCount += 1;
+      return new Promise((resolve) => {
+        resolveRequest = resolve;
+      });
+    },
   });
-  const first = pairing.pair("first");
-  const second = pairing.pair("second");
-  resolvers[0]({ token: "b".repeat(43), device: { id: "old" } });
-  assert.equal((await first).stale, true);
-  assert.deepEqual(storage.writes, []);
-  resolvers[1]({ token: TOKEN, device: { id: "new" } });
-  assert.equal((await second).device.id, "new");
-  assert.deepEqual(storage.writes, [TOKEN]);
 
+  const first = pairing.pair("AURIC-ABCDE-FGHIJ", "Phone");
+  const second = pairing.pair("AURIC-ABCDE-FGHIJ", "Phone");
+
+  assert.equal(requestCount, 1);
+  assert.equal(second, first);
+
+  resolveRequest({ token: TOKEN, device: { id: "device-1" } });
+  const [firstResult, secondResult] = await Promise.all([first, second]);
+  assert.equal(firstResult.device.id, "device-1");
+  assert.equal(secondResult.device.id, "device-1");
+  assert.deepEqual(storage.writes, [TOKEN]);
+});
+
+test("pairing failures do not save a token and release the in-flight lock", async () => {
+  const storage = fakeSecureStore();
+  const session = createAuthSession({ secureStore: storage });
+  let requestCount = 0;
   const failing = createPairingFlow({
     authSession: session,
     pairRequest: async () => {
-      throw new Error("invalid");
+      requestCount += 1;
+      if (requestCount === 1) throw new Error("invalid");
+      return { token: TOKEN, device: { id: "device-1" } };
     },
   });
+
   await assert.rejects(failing.pair("bad"));
+  const retry = await failing.pair("good");
+  assert.equal(requestCount, 2);
+  assert.equal(retry.device.id, "device-1");
   assert.deepEqual(storage.writes, [TOKEN]);
 });
 
