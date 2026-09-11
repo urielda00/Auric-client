@@ -1,5 +1,5 @@
-import AsyncStorage from '@react-native-async-storage/async-storage';
-import * as SecureStore from 'expo-secure-store';
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import * as SecureStore from "expo-secure-store";
 
 /**
  * Thin persistence boundary. Screens and stores never touch AsyncStorage/SecureStore
@@ -7,7 +7,7 @@ import * as SecureStore from 'expo-secure-store';
  * server-authoritative sync) doesn't ripple through the app.
  */
 
-const NAMESPACE = 'auric';
+const NAMESPACE = "auric";
 const key = (name) => `${NAMESPACE}:${name}`;
 
 export async function loadJSON(name, fallback = null) {
@@ -43,15 +43,15 @@ export async function removeJSON(name) {
 export const secureAuth = {
   async getToken() {
     try {
-      return await SecureStore.getItemAsync(key('authToken'));
+      return await SecureStore.getItemAsync(key("authToken"));
     } catch {
       return null;
     }
   },
   async setToken(token) {
     try {
-      if (token) await SecureStore.setItemAsync(key('authToken'), token);
-      else await SecureStore.deleteItemAsync(key('authToken'));
+      if (token) await SecureStore.setItemAsync(key("authToken"), token);
+      else await SecureStore.deleteItemAsync(key("authToken"));
     } catch {
       // no-op
     }
@@ -59,15 +59,16 @@ export const secureAuth = {
 };
 
 export const STORAGE_KEYS = {
-  liked: 'liked',
-  history: 'history',
-  queue: 'queue',
-  queueIndex: 'queueIndex',
-  currentTrack: 'currentTrack',
-  positionMs: 'positionMs',
-  playbackContext: 'playbackContext',
-  shuffleMode: 'shuffleMode',
-  recentSearches: 'recentSearches',
-  library: 'library',
-  pendingListeningSessions: 'pendingListeningSessions',
+  liked: "liked",
+  history: "history",
+  queue: "queue",
+  queueIndex: "queueIndex",
+  currentTrack: "currentTrack",
+  positionMs: "positionMs",
+  playbackContext: "playbackContext",
+  shuffleMode: "shuffleMode",
+  recentSearches: "recentSearches",
+  library: "library",
+  pendingListeningSessions: "pendingListeningSessions",
+  playbackSnapshot: "playbackSnapshot",
 };

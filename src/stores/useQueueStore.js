@@ -1,89 +1,149 @@
-import { create } from 'zustand';
-import { queueService } from '../services/queueService';
+import { create } from "zustand";
+import { queueService } from "../services/queueService";
+import { generateUuid } from "../utils/id";
 
 const queueContext = (type, label) => ({ type, label });
+let persistenceHandler = null;
 
-/** Local upcoming queue with source context retained for each Track. */
+export function setQueuePersistenceHandler(handler) {
+  persistenceHandler = handler;
+}
+
+function entry(trackId, context, id = generateUuid()) {
+  return { id, trackId, context };
+}
+
+function derived(entries) {
+  return {
+    entries,
+    ids: entries.map((item) => item.trackId),
+    contexts: Object.fromEntries(
+      entries.map((item) => [item.trackId, item.context]),
+    ),
+  };
+}
+
+/** Upcoming queue. Stable entry IDs are canonical; ids/contexts remain UI compatibility views. */
 export const useQueueStore = create((set, get) => ({
+  entries: [],
   ids: [],
   contexts: {},
   hydrated: false,
 
   async hydrate() {
     const state = await queueService.getQueueState();
-    set({ ...state, hydrated: true });
+    const entries = state.ids.map((trackId) =>
+      entry(
+        trackId,
+        state.contexts[trackId] || queueContext("manual_queue", "Queue"),
+      ),
+    );
+    set({ ...derived(entries), hydrated: true });
   },
 
-  _persist(ids, contexts) {
-    queueService.setQueueState({ ids, contexts });
+  hydrateSnapshot(items = []) {
+    const entries = items.map((item) =>
+      entry(
+        item.trackId,
+        item.context || queueContext("manual_queue", "Queue"),
+        item.id,
+      ),
+    );
+    set({ ...derived(entries), hydrated: true });
   },
 
-  setQueue(ids, contexts = {}) {
-    set({ ids, contexts });
-    get()._persist(ids, contexts);
+  _commit(entries, { persist = true } = {}) {
+    const state = derived(entries);
+    set(state);
+    queueService.setQueueState({ ids: state.ids, contexts: state.contexts });
+    if (persist) persistenceHandler?.();
   },
 
-  getContext(id) {
-    return get().contexts[id] || queueContext('manual_queue', 'Queue');
+  setQueue(ids, contexts = {}, options) {
+    get()._commit(
+      ids.map((trackId) =>
+        entry(
+          trackId,
+          contexts[trackId] || queueContext("manual_queue", "Queue"),
+        ),
+      ),
+      options,
+    );
   },
 
-  enqueueNext(id, context = queueContext('play_next', 'Play Next')) {
-    const ids = [id, ...get().ids.filter((trackId) => trackId !== id)];
-    const contexts = { ...get().contexts, [id]: context };
-    get().setQueue(ids, contexts);
+  getContext(trackId) {
+    return (
+      get().entries.find((item) => item.trackId === trackId)?.context ||
+      queueContext("manual_queue", "Queue")
+    );
   },
 
-  enqueueEnd(id, context = queueContext('manual_queue', 'Queue')) {
-    const ids = [...get().ids.filter((trackId) => trackId !== id), id];
-    const contexts = { ...get().contexts, [id]: context };
-    get().setQueue(ids, contexts);
+  enqueueNext(
+    trackId,
+    context = queueContext("play_next", "Play Next"),
+    options,
+  ) {
+    const entries = [
+      entry(trackId, context, options?.itemId),
+      ...get().entries.filter((item) => item.trackId !== trackId),
+    ];
+    get()._commit(entries, options);
   },
 
-  removeAt(index) {
-    const id = get().ids[index];
-    const ids = get().ids.filter((_, itemIndex) => itemIndex !== index);
-    const contexts = { ...get().contexts };
-    if (id) delete contexts[id];
-    get().setQueue(ids, contexts);
+  enqueueEnd(
+    trackId,
+    context = queueContext("manual_queue", "Queue"),
+    options,
+  ) {
+    const entries = [
+      ...get().entries.filter((item) => item.trackId !== trackId),
+      entry(trackId, context),
+    ];
+    get()._commit(entries, options);
   },
 
-  removeId(id) {
-    const ids = get().ids.filter((trackId) => trackId !== id);
-    const contexts = { ...get().contexts };
-    delete contexts[id];
-    get().setQueue(ids, contexts);
+  removeAt(index, options) {
+    get()._commit(
+      get().entries.filter((_, itemIndex) => itemIndex !== index),
+      options,
+    );
   },
 
-  move(from, to) {
-    const ids = [...get().ids];
-    if (from < 0 || from >= ids.length || to < 0 || to >= ids.length) return;
-    const [moved] = ids.splice(from, 1);
-    ids.splice(to, 0, moved);
-    get().setQueue(ids, get().contexts);
+  removeId(trackId, options) {
+    get()._commit(
+      get().entries.filter((item) => item.trackId !== trackId),
+      options,
+    );
   },
 
-  shiftEntry() {
-    const [id, ...ids] = get().ids;
-    if (!id) return null;
-    const context = get().getContext(id);
-    const contexts = { ...get().contexts };
-    delete contexts[id];
-    get().setQueue(ids, contexts);
-    return { id, context };
+  move(from, to, options) {
+    const entries = [...get().entries];
+    if (from < 0 || from >= entries.length || to < 0 || to >= entries.length)
+      return;
+    const [moved] = entries.splice(from, 1);
+    entries.splice(to, 0, moved);
+    get()._commit(entries, options);
   },
 
-  shift() {
-    return get().shiftEntry()?.id || null;
+  shiftEntry(options) {
+    const [first, ...entries] = get().entries;
+    if (!first) return null;
+    get()._commit(entries, options);
+    return { id: first.trackId, itemId: first.id, context: first.context };
   },
 
-  clear() {
-    get().setQueue([], {});
+  shift(options) {
+    return get().shiftEntry(options)?.id || null;
   },
 
-  setFrom(ids, context = queueContext('manual_queue', 'Queue')) {
-    get().setQueue(
-      ids,
-      Object.fromEntries(ids.map((id) => [id, context])),
+  clear(options) {
+    get()._commit([], options);
+  },
+
+  setFrom(ids, context = queueContext("manual_queue", "Queue"), options) {
+    get()._commit(
+      ids.map((trackId) => entry(trackId, context)),
+      options,
     );
   },
 }));

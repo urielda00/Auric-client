@@ -92,15 +92,25 @@ export const musicService = {
 
   async getAllTracks() {
     if (apiClient) {
-      const items = [];
-      let cursor;
-      do {
-        const page = await this.getLibraryPage({ cursor, limit: 100 });
-        items.push(...page.items);
-        cursor = page.nextCursor || undefined;
-      } while (cursor);
-      library = items;
-      return items;
+      try {
+        const items = [];
+        let cursor;
+        do {
+          const page = await this.getLibraryPage({ cursor, limit: 100 });
+          items.push(...page.items);
+          cursor = page.nextCursor || undefined;
+        } while (cursor);
+        library = items;
+        await saveJSON(STORAGE_KEYS.library, items);
+        return items;
+      } catch (error) {
+        const cached = await loadJSON(STORAGE_KEYS.library, []);
+        if (Array.isArray(cached) && cached.length) {
+          library = cached;
+          return cached;
+        }
+        throw error;
+      }
     }
     await ensureHydrated();
     return library;

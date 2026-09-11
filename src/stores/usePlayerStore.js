@@ -1,11 +1,12 @@
 import { create } from "zustand";
 import { audioEngine } from "../services/audio";
-import { useQueueStore } from "./useQueueStore";
+import { setQueuePersistenceHandler, useQueueStore } from "./useQueueStore";
 import { useLibraryStore } from "./useLibraryStore";
 import { recommendationService } from "../services/recommendationService";
 import { loadJSON, saveJSON, STORAGE_KEYS } from "../services/storage";
 import { listeningService } from "../services/listeningService";
 import { generateUuid } from "../utils/id";
+import { playbackStateService } from "../services/playbackStateService";
 
 const { isTrackPlayable } = require("../services/trackMapper.cjs");
 const {
@@ -17,12 +18,18 @@ const {
 const {
   createListeningSessionTracker,
 } = require("../services/listeningSessionTracker.cjs");
+const {
+  restorePlaybackSnapshot,
+} = require("../services/audio/playbackRestore.cjs");
+const {
+  createCheckpointGate,
+} = require("../services/audio/checkpointPolicy.cjs");
 
-const PERSIST_INTERVAL_MS = 5000;
+const CHECKPOINT_INTERVAL_MS = 15000;
 const RESTART_THRESHOLD_MS = 4000;
 const PLAYED_STACK_LIMIT = 50;
 
-let lastPersistAt = 0;
+const checkpointGate = createCheckpointGate(CHECKPOINT_INTERVAL_MS);
 let activationSequence = 0;
 
 function contextFor(type, label) {
@@ -51,6 +58,7 @@ const listeningTracker = createListeningSessionTracker({
 
 export const usePlayerStore = create((set, get) => ({
   currentTrackId: null,
+  currentItemId: null,
   isPlaying: false,
   positionMs: 0,
   durationMs: 0,
@@ -60,26 +68,40 @@ export const usePlayerStore = create((set, get) => ({
   playbackContext: contextFor("none", ""),
   shuffleMode: null,
   playedStack: [],
+  playedItems: [],
   hydrated: false,
 
   async hydrate() {
+    setQueuePersistenceHandler(() => {
+      void persistPlaybackState(get(), "replace");
+    });
+    playbackStateService.setConflictHandler((snapshot) =>
+      applyRestoredSnapshot(set, get, snapshot),
+    );
     audioEngine.setOnStatus((status) => {
       if (!isCurrentPlaybackEvent(status, get().currentTrackId)) return;
       listeningTracker.handleStatus(status, get().playbackContext);
       const currentDuration = get().durationMs;
+      const hadPlaybackError = Boolean(get().playbackError);
       set({
         positionMs: status.positionMs,
-        durationMs:
-          status.durationMs > 0 ? status.durationMs : currentDuration,
+        durationMs: status.durationMs > 0 ? status.durationMs : currentDuration,
         isPlaying: status.isPlaying,
         isBuffering: status.isBuffering,
         isLoading: !status.isLoaded && !status.error,
         playbackError: status.error ? playbackFailureMessage() : null,
       });
       const now = Date.now();
-      if (now - lastPersistAt > PERSIST_INTERVAL_MS) {
-        persistSession(get());
-        lastPersistAt = now;
+      if (
+        checkpointGate.shouldCheckpoint({
+          nowMs: now,
+          isPlaying: status.isPlaying,
+        })
+      ) {
+        void persistPlaybackState(get(), "checkpoint");
+      }
+      if (status.error && !hadPlaybackError) {
+        void persistPlaybackState(get(), "checkpoint");
       }
     });
     audioEngine.setOnEnded(
@@ -90,35 +112,9 @@ export const usePlayerStore = create((set, get) => ({
     );
 
     await listeningTracker.recoverPending();
-    const session = await loadJSON(STORAGE_KEYS.currentTrack, null);
-    if (session?.trackId) {
-      const track = useLibraryStore.getState().getTrackById(session.trackId);
-      if (track && isTrackPlayable(track)) {
-        const positionMs = normalizeRestoredPosition(
-          session.positionMs,
-          track.durationMs,
-        );
-        set({
-          currentTrackId: session.trackId,
-          positionMs,
-          durationMs: track.durationMs || 0,
-          isPlaying: false,
-          isLoading: true,
-          playbackError: null,
-          playbackContext: contextFor("resume", "Resumed"),
-          shuffleMode: session.shuffleMode || null,
-        });
-        try {
-          await audioEngine.load(track);
-          await audioEngine.seekTo(positionMs);
-        } catch {
-          set({
-            isLoading: false,
-            isBuffering: false,
-            playbackError: playbackFailureMessage(),
-          });
-        }
-      }
+    const restored = await playbackStateService.hydrate();
+    if (restored.snapshot && restored.source !== "local-stale-hydration") {
+      await applyRestoredSnapshot(set, get, restored.snapshot);
     }
     set({ hydrated: true, isPlaying: false });
   },
@@ -130,16 +126,21 @@ export const usePlayerStore = create((set, get) => ({
       : null;
   },
 
-  async play(trackId, context) {
+  async play(trackId, context, queueItemId) {
     const track = useLibraryStore.getState().getTrackById(trackId);
     if (!track || !isTrackPlayable(track)) return;
-    useQueueStore.getState().removeId(trackId);
+    playbackStateService.markLocalChange();
+    useQueueStore.getState().removeId(trackId, { persist: false });
     await activate(
       set,
       get,
       track,
       context || contextFor("direct", "Library"),
-      { pushCurrentToStack: true, endPreviousReason: "replaced" },
+      {
+        pushCurrentToStack: true,
+        endPreviousReason: "replaced",
+        currentItemId: queueItemId,
+      },
     );
   },
 
@@ -164,7 +165,7 @@ export const usePlayerStore = create((set, get) => ({
         set({ playbackError: playbackFailureMessage(), isPlaying: false });
       }
     }
-    persistSession(get());
+    void persistPlaybackState(get(), "checkpoint");
   },
 
   async seek(ms) {
@@ -178,43 +179,62 @@ export const usePlayerStore = create((set, get) => ({
       listeningTracker.end("error", get().positionMs);
       set({ playbackError: playbackFailureMessage() });
     }
-    persistSession(get());
+    void persistPlaybackState(get(), "checkpoint");
   },
 
   async previous() {
-    const { positionMs, playedStack, currentTrackId } = get();
+    playbackStateService.markLocalChange();
+    const {
+      positionMs,
+      playedStack,
+      playedItems,
+      currentTrackId,
+      currentItemId,
+    } = get();
     if (currentTrackId) {
       listeningTracker.end("skipped_previous", positionMs);
     }
     if (positionMs > RESTART_THRESHOLD_MS || !playedStack.length) {
       set({ playbackContext: contextFor("direct", "Previous") });
       await get().seek(0);
+      void persistPlaybackState(get(), "replace");
       return;
     }
-    const prevId = playedStack[playedStack.length - 1];
+    const previousItem = playedItems[playedItems.length - 1];
+    const prevId = previousItem?.trackId || playedStack[playedStack.length - 1];
     const track = useLibraryStore.getState().getTrackById(prevId);
     if (!track || !isTrackPlayable(track)) return;
-    set({ playedStack: playedStack.slice(0, -1) });
+    set({
+      playedStack: playedStack.slice(0, -1),
+      playedItems: playedItems.slice(0, -1),
+    });
     if (currentTrackId) {
       useQueueStore
         .getState()
-        .enqueueNext(currentTrackId, get().playbackContext);
+        .enqueueNext(currentTrackId, get().playbackContext, {
+          persist: false,
+          itemId: currentItemId,
+        });
     }
     await activate(set, get, track, contextFor("direct", "Previous"), {
       pushCurrentToStack: false,
       endPreviousReason: null,
+      currentItemId: previousItem?.id,
     });
   },
 
   async next(endedReason = "skipped_next") {
+    playbackStateService.markLocalChange();
     if (get().currentTrackId) {
       listeningTracker.end(endedReason, get().positionMs);
     }
     let queuedContext = null;
+    let queuedItemId = null;
     const track = takeNextPlayable({
       shift: () => {
-        const entry = useQueueStore.getState().shiftEntry();
+        const entry = useQueueStore.getState().shiftEntry({ persist: false });
         queuedContext = entry?.context || null;
+        queuedItemId = entry?.itemId || null;
         return entry?.id || null;
       },
       getTrack: (id) => useLibraryStore.getState().getTrackById(id),
@@ -226,7 +246,11 @@ export const usePlayerStore = create((set, get) => ({
         get,
         track,
         queuedContext || contextFor("manual_queue", "Queue"),
-        { pushCurrentToStack: true, endPreviousReason: null },
+        {
+          pushCurrentToStack: true,
+          endPreviousReason: null,
+          currentItemId: queuedItemId,
+        },
       );
       return;
     }
@@ -236,7 +260,7 @@ export const usePlayerStore = create((set, get) => ({
       set({ playbackError: playbackFailureMessage() });
     }
     set({ isPlaying: false, isBuffering: false, isLoading: false });
-    persistSession(get());
+    void persistPlaybackState(get(), "replace");
   },
 
   async startSmartShuffle() {
@@ -249,6 +273,7 @@ export const usePlayerStore = create((set, get) => ({
     useQueueStore.getState().setFrom(
       rest.map((track) => track.id),
       context,
+      { persist: false },
     );
     set({ shuffleMode: "smart" });
     await activate(set, get, first, context, {
@@ -267,6 +292,7 @@ export const usePlayerStore = create((set, get) => ({
     useQueueStore.getState().setFrom(
       rest.map((track) => track.id),
       context,
+      { persist: false },
     );
     set({ shuffleMode: "random" });
     await activate(set, get, first, context, {
@@ -283,7 +309,7 @@ export const usePlayerStore = create((set, get) => ({
     const [first, ...rest] = playable;
     const track = useLibraryStore.getState().getTrackById(first);
     const context = contextFor("liked_songs", "Liked Songs");
-    useQueueStore.getState().setFrom(rest, context);
+    useQueueStore.getState().setFrom(rest, context, { persist: false });
     set({ shuffleMode: null });
     await activate(set, get, track, context, {
       pushCurrentToStack: true,
@@ -301,7 +327,7 @@ export const usePlayerStore = create((set, get) => ({
     const [first, ...rest] = shuffled;
     const track = useLibraryStore.getState().getTrackById(first);
     const context = contextFor("liked_songs", "Liked Songs · Shuffle");
-    useQueueStore.getState().setFrom(rest, context);
+    useQueueStore.getState().setFrom(rest, context, { persist: false });
     set({ shuffleMode: null });
     await activate(set, get, track, context, {
       pushCurrentToStack: true,
@@ -318,9 +344,10 @@ export const usePlayerStore = create((set, get) => ({
     });
   },
 
-  persistNow() {
-    persistSession(get());
+  async persistNow() {
     listeningTracker.checkpointNow(true);
+    await persistPlaybackState(get(), "replace");
+    await playbackStateService.flush();
   },
 }));
 
@@ -329,7 +356,7 @@ async function activate(
   get,
   track,
   context,
-  { pushCurrentToStack, endPreviousReason },
+  { pushCurrentToStack, endPreviousReason, currentItemId },
 ) {
   if (!isTrackPlayable(track)) return;
   const operation = ++activationSequence;
@@ -339,6 +366,7 @@ async function activate(
   }
   set((state) => ({
     currentTrackId: track.id,
+    currentItemId: currentItemId || generateUuid(),
     positionMs: 0,
     durationMs: track.durationMs || 0,
     isPlaying: false,
@@ -350,14 +378,25 @@ async function activate(
       pushCurrentToStack && prevId && prevId !== track.id
         ? [...state.playedStack, prevId].slice(-PLAYED_STACK_LIMIT)
         : state.playedStack,
+    playedItems:
+      pushCurrentToStack && prevId && prevId !== track.id
+        ? [
+            ...state.playedItems,
+            {
+              id: state.currentItemId || generateUuid(),
+              trackId: prevId,
+              context: state.playbackContext,
+            },
+          ].slice(-PLAYED_STACK_LIMIT)
+        : state.playedItems,
   }));
+  void persistPlaybackState(get(), "replace");
   try {
     await audioEngine.load(track);
     if (operation !== activationSequence) return;
     await audioEngine.play();
     if (operation !== activationSequence) return;
-    persistSession(get());
-    lastPersistAt = Date.now();
+    checkpointGate.reset(Date.now());
   } catch {
     if (operation === activationSequence) {
       set({
@@ -366,17 +405,54 @@ async function activate(
         isLoading: false,
         playbackError: playbackFailureMessage(),
       });
-      persistSession(get());
+      void persistPlaybackState(get(), "replace");
     }
   }
 }
 
-function persistSession(state) {
-  saveJSON(STORAGE_KEYS.currentTrack, {
+async function persistPlaybackState(state, mode) {
+  const snapshot = {
+    current: state.currentTrackId
+      ? {
+          id: state.currentItemId || generateUuid(),
+          trackId: state.currentTrackId,
+          context: state.playbackContext,
+        }
+      : null,
+    positionMs: state.currentTrackId ? state.positionMs : 0,
+    shuffleMode: state.shuffleMode,
+    upcoming: useQueueStore.getState().entries,
+    played: state.playedItems,
+    updatedAtMs: Date.now(),
+  };
+  void saveJSON(STORAGE_KEYS.currentTrack, {
     trackId: state.currentTrackId,
     positionMs: state.positionMs,
     context: state.playbackContext,
     shuffleMode: state.shuffleMode,
+  });
+  try {
+    return mode === "checkpoint"
+      ? await playbackStateService.checkpoint(snapshot)
+      : await playbackStateService.replace(snapshot);
+  } catch {
+    return null;
+  }
+}
+
+async function applyRestoredSnapshot(set, get, snapshot) {
+  activationSequence += 1;
+  return restorePlaybackSnapshot({
+    snapshot,
+    getTrack: (id) => useLibraryStore.getState().getTrackById(id),
+    cacheTracks: (tracks) => useLibraryStore.getState().cacheTracks(tracks),
+    hydrateQueue: (items) => useQueueStore.getState().hydrateSnapshot(items),
+    setPlayer: set,
+    getCurrentTrackId: () => get().currentTrackId,
+    audioEngine,
+    isPlayable: isTrackPlayable,
+    normalizePosition: normalizeRestoredPosition,
+    playbackFailureMessage,
   });
 }
 
