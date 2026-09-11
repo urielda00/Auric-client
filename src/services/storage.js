@@ -9,6 +9,7 @@ import * as SecureStore from "expo-secure-store";
 
 const NAMESPACE = "auric";
 const key = (name) => `${NAMESPACE}:${name}`;
+const SECURE_AUTH_TOKEN_KEY = "auric.authToken";
 
 export async function loadJSON(name, fallback = null) {
   try {
@@ -40,14 +41,14 @@ export async function removeJSON(name) {
 export const secureAuth = {
   async getToken() {
     try {
-      return await SecureStore.getItemAsync(key("authToken"));
+      return await SecureStore.getItemAsync(SECURE_AUTH_TOKEN_KEY);
     } catch {
       return null;
     }
   },
   async setToken(token) {
-    if (token) await SecureStore.setItemAsync(key("authToken"), token);
-    else await SecureStore.deleteItemAsync(key("authToken"));
+    if (token) await SecureStore.setItemAsync(SECURE_AUTH_TOKEN_KEY, token);
+    else await SecureStore.deleteItemAsync(SECURE_AUTH_TOKEN_KEY);
   },
 };
 
