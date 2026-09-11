@@ -1,20 +1,26 @@
-import React from 'react';
-import { View, Text, StyleSheet } from 'react-native';
-import { GestureHandlerRootView } from 'react-native-gesture-handler';
-import { SafeAreaProvider } from 'react-native-safe-area-context';
-import { StatusBar } from 'expo-status-bar';
-import { Stack } from 'expo-router';
-import { useFonts, SpaceGrotesk_600SemiBold, SpaceGrotesk_700Bold } from '@expo-google-fonts/space-grotesk';
+import React from "react";
+import { View, Text, StyleSheet } from "react-native";
+import { GestureHandlerRootView } from "react-native-gesture-handler";
+import { SafeAreaProvider } from "react-native-safe-area-context";
+import { StatusBar } from "expo-status-bar";
+import { Stack } from "expo-router";
+import {
+  useFonts,
+  SpaceGrotesk_600SemiBold,
+  SpaceGrotesk_700Bold,
+} from "@expo-google-fonts/space-grotesk";
 import {
   Manrope_400Regular,
   Manrope_500Medium,
   Manrope_600SemiBold,
   Manrope_700Bold,
   Manrope_800ExtraBold,
-} from '@expo-google-fonts/manrope';
-import { useAppHydration } from '../src/hooks/useAppHydration';
-import { usePersistOnBackground } from '../src/hooks/usePersistOnBackground';
-import { colors } from '../src/constants/theme';
+} from "@expo-google-fonts/manrope";
+import { useAppHydration } from "../src/hooks/useAppHydration";
+import { useAuthSession } from "../src/hooks/useAuthSession";
+import { usePersistOnBackground } from "../src/hooks/usePersistOnBackground";
+import { colors } from "../src/constants/theme";
+import { PairingScreen } from "../src/features/pairing/PairingScreen";
 
 export default function RootLayout() {
   const [fontsLoaded] = useFonts({
@@ -26,10 +32,11 @@ export default function RootLayout() {
     Manrope_700Bold,
     Manrope_800ExtraBold,
   });
-  const hydrated = useAppHydration();
+  const auth = useAuthSession();
+  const hydrated = useAppHydration(auth.hydrated && auth.authenticated);
   usePersistOnBackground();
 
-  if (!fontsLoaded || !hydrated) {
+  if (!fontsLoaded || !auth.hydrated || (auth.authenticated && !hydrated)) {
     return (
       <View style={styles.splash}>
         <View style={styles.logoDot} />
@@ -38,19 +45,60 @@ export default function RootLayout() {
     );
   }
 
+  if (!auth.authenticated) {
+    return (
+      <SafeAreaProvider>
+        <StatusBar style="light" />
+        <PairingScreen />
+      </SafeAreaProvider>
+    );
+  }
+
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
       <SafeAreaProvider>
         <StatusBar style="light" />
-        <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: colors.bg } }}>
+        <Stack
+          screenOptions={{
+            headerShown: false,
+            contentStyle: { backgroundColor: colors.bg },
+          }}
+        >
           <Stack.Screen name="(tabs)" />
-          <Stack.Screen name="liked" options={{ animation: 'slide_from_right' }} />
-          <Stack.Screen name="history" options={{ animation: 'slide_from_right' }} />
-          <Stack.Screen name="stats" options={{ animation: 'slide_from_right' }} />
-          <Stack.Screen name="add" options={{ animation: 'slide_from_right' }} />
-          <Stack.Screen name="player" options={{ presentation: 'modal', animation: 'slide_from_bottom' }} />
-          <Stack.Screen name="queue" options={{ presentation: 'transparentModal', animation: 'slide_from_bottom' }} />
-          <Stack.Screen name="shuffle" options={{ presentation: 'transparentModal', animation: 'slide_from_bottom' }} />
+          <Stack.Screen
+            name="liked"
+            options={{ animation: "slide_from_right" }}
+          />
+          <Stack.Screen
+            name="history"
+            options={{ animation: "slide_from_right" }}
+          />
+          <Stack.Screen
+            name="stats"
+            options={{ animation: "slide_from_right" }}
+          />
+          <Stack.Screen
+            name="add"
+            options={{ animation: "slide_from_right" }}
+          />
+          <Stack.Screen
+            name="player"
+            options={{ presentation: "modal", animation: "slide_from_bottom" }}
+          />
+          <Stack.Screen
+            name="queue"
+            options={{
+              presentation: "transparentModal",
+              animation: "slide_from_bottom",
+            }}
+          />
+          <Stack.Screen
+            name="shuffle"
+            options={{
+              presentation: "transparentModal",
+              animation: "slide_from_bottom",
+            }}
+          />
         </Stack>
       </SafeAreaProvider>
     </GestureHandlerRootView>
@@ -60,8 +108,8 @@ export default function RootLayout() {
 const styles = StyleSheet.create({
   splash: {
     flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
+    alignItems: "center",
+    justifyContent: "center",
     gap: 14,
     backgroundColor: colors.bg,
   },
@@ -72,7 +120,7 @@ const styles = StyleSheet.create({
     backgroundColor: colors.violet,
   },
   wordmark: {
-    fontFamily: 'Manrope_700Bold',
+    fontFamily: "Manrope_700Bold",
     fontSize: 13,
     letterSpacing: 4,
     color: colors.textMute,

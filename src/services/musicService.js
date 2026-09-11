@@ -2,8 +2,9 @@ import { MOCK_TRACKS } from "../mocks/tracks";
 import { loadJSON, saveJSON, STORAGE_KEYS } from "./storage";
 import { generateId } from "../utils/id";
 import { apiConfig } from "./apiConfig";
+import { authSession } from "./authSession";
+import { serverApi } from "./serverApi";
 
-const { createApiClient } = require("./apiClient.cjs");
 const { mapTrackDto } = require("./trackMapper.cjs");
 const { createTrackStreamSource } = require("./audio/streamSource.cjs");
 
@@ -20,12 +21,7 @@ let library = apiConfig.useServer
 const remoteTracks = new Map();
 let hydrated = false;
 let hydratingPromise = null;
-const apiClient = apiConfig.useServer
-  ? createApiClient({
-      baseUrl: apiConfig.baseUrl,
-      timeoutMs: apiConfig.timeoutMs,
-    })
-  : null;
+const apiClient = serverApi;
 
 async function ensureHydrated() {
   if (hydrated) return;
@@ -54,7 +50,12 @@ export const musicService = {
   getStreamSource(track, headers = {}) {
     if (!apiClient) throw new Error("Auric API is not configured");
     if (track?.hasMedia === false) throw new Error("TRACK_HAS_NO_MEDIA");
-    return createTrackStreamSource(apiConfig.baseUrl, track?.id, headers);
+    const token = authSession.getToken();
+    if (!token) throw new Error("AUTHENTICATION_REQUIRED");
+    return createTrackStreamSource(apiConfig.baseUrl, track?.id, {
+      ...headers,
+      Authorization: `Bearer ${token}`,
+    });
   },
 
   async getLibraryPage({ cursor, limit = 50, signal } = {}) {

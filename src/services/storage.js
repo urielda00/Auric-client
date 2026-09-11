@@ -36,10 +36,7 @@ export async function removeJSON(name) {
   }
 }
 
-/**
- * Secure token storage, unused in this mock phase (there is no auth yet) but kept behind
- * this abstraction so a future login flow only needs to call these two functions.
- */
+/** Device credentials are the only values stored outside AsyncStorage. */
 export const secureAuth = {
   async getToken() {
     try {
@@ -49,12 +46,8 @@ export const secureAuth = {
     }
   },
   async setToken(token) {
-    try {
-      if (token) await SecureStore.setItemAsync(key("authToken"), token);
-      else await SecureStore.deleteItemAsync(key("authToken"));
-    } catch {
-      // no-op
-    }
+    if (token) await SecureStore.setItemAsync(key("authToken"), token);
+    else await SecureStore.deleteItemAsync(key("authToken"));
   },
 };
 

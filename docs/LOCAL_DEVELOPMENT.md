@@ -10,6 +10,12 @@ Auric-server. Expo embeds `EXPO_PUBLIC_` variables in the client bundle.
 - Set `EXPO_PUBLIC_AURIC_USE_MOCKS=true`, or omit the API URL, to retain mock
   library and `MockAudioEngine` behavior for isolated UI development.
 
+Mock mode bypasses device pairing and never reads or writes SecureStore. With a real
+server URL, the app opens the private-device pairing screen until a valid token is stored.
+Build Auric-server and run `npm run pairing:create` there, then enter the one-time code.
+The opaque token is stored only in Expo SecureStore. A real server `401` clears it and
+returns to pairing; an offline/network error preserves it.
+
 Run the server with the canonical database and music directory configured. For the
 read-only rehearsal copy, the equivalent PowerShell environment is:
 
@@ -43,3 +49,9 @@ and Full Player UI.
 
 Restart Expo after changing environment variables. The last track and position restore
 paused; reopening the app never auto-starts audio.
+
+For production, set `EXPO_PUBLIC_AURIC_API_URL` to the HTTPS Cloudflare Tunnel origin.
+Never embed a bearer token, pairing code, cookies, or Tunnel credential in Expo public
+environment variables. Audio uses expo-audio's supported source `headers` field so every
+initial and Range request carries `Authorization` without placing the token in the URL or
+Track object.
