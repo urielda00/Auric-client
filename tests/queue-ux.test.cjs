@@ -74,7 +74,31 @@ test("deriving the queue is read-only and past items never receive queue indexes
 
 test("queue initial offset anchors the scroll viewport at the current row", () => {
   assert.equal(getQueueInitialOffset(0), 0);
-  assert.equal(getQueueInitialOffset(3), 3 * PLAYED_ROW_HEIGHT);
+  assert.equal(getQueueInitialOffset(1), PLAYED_ROW_HEIGHT);
+  assert.equal(getQueueInitialOffset(50), 50 * PLAYED_ROW_HEIGHT);
+
+  const timeline = deriveQueueTimeline({
+    playedItems: [
+      entry("cached"),
+      entry("missing-from-cache"),
+      entry("unavailable"),
+    ],
+    currentTrackId: "current",
+    tracksById: {
+      cached: track("cached"),
+      unavailable: { ...track("unavailable"), hasMedia: false },
+      current: track("current"),
+    },
+  });
+
+  assert.deepEqual(
+    timeline.played.map((item) => item.trackId),
+    ["cached", "unavailable"],
+  );
+  assert.equal(
+    getQueueInitialOffset(timeline.played.length),
+    2 * PLAYED_ROW_HEIGHT,
+  );
 });
 
 test("queue header delegates Play/Pause to the existing player toggle", () => {
