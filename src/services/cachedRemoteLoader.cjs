@@ -1,5 +1,9 @@
 function createCachedRemoteLoader({ loadRemote, loadCache, saveCache }) {
   return {
+    async loadCached() {
+      const value = await loadCache();
+      return value == null ? null : { value, cached: true };
+    },
     async load(options = {}) {
       try {
         const value = await loadRemote(options);

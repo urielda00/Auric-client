@@ -1,6 +1,13 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 
+const {
+  normalizeSearch,
+} = require("../src/utils/searchNormalization.cjs");
+const {
+  createLibraryCacheCoordinator,
+} = require("../src/services/libraryCacheCoordinator.cjs");
+
 const { ApiError, createApiClient } = require("../src/services/apiClient.cjs");
 const { createAddMusicApi, mapImportJob } = require("../src/services/addMusicApi.cjs");
 const {
@@ -37,6 +44,59 @@ const DTO = {
   duration_ms: 123000,
   has_media: false,
 };
+
+test("search normalization preserves Hebrew and normalizes English punctuation", () => {
+  assert.equal(normalizeSearch("  חופשת!!!  "), "חופשת");
+  assert.equal(normalizeSearch("  עדן   בן זקן  "), "עדן בן זקן");
+  assert.equal(normalizeSearch("  Lose-Yourself!  "), "lose yourself");
+});
+
+test("library hydration is cache-first, shares refresh work, and rejects stale responses", async () => {
+  let resolveRemote;
+  let remoteCalls = 0;
+  const applied = [];
+  const remote = new Promise((resolve) => {
+    resolveRemote = resolve;
+  });
+  const coordinator = createLibraryCacheCoordinator({
+    loadCache: async () => ({
+      version: 1,
+      updatedAtMs: 10,
+      tracks: [{ id: "cached" }],
+    }),
+    saveCache: async () => {},
+    loadRemote: () => {
+      remoteCalls += 1;
+      return remote;
+    },
+    apply: (tracks) => applied.push(tracks.map((track) => track.id)),
+  });
+
+  assert.deepEqual(await coordinator.hydrateCache(), [{ id: "cached" }]);
+  const firstRefresh = coordinator.refresh();
+  const duplicateRefresh = coordinator.refresh();
+  assert.equal(remoteCalls, 1);
+  coordinator.markLocalChange();
+  resolveRemote([{ id: "stale-remote" }]);
+  assert.equal((await firstRefresh).applied, false);
+  assert.equal((await duplicateRefresh).applied, false);
+  assert.deepEqual(applied, [["cached"]]);
+});
+
+test("failed library refresh preserves the applied cache", async () => {
+  const applied = [];
+  const coordinator = createLibraryCacheCoordinator({
+    loadCache: async () => [{ id: "cached" }],
+    saveCache: async () => {},
+    loadRemote: async () => {
+      throw new Error("offline");
+    },
+    apply: (tracks) => applied.push(tracks.map((track) => track.id)),
+  });
+  await coordinator.hydrateCache();
+  await assert.rejects(coordinator.refresh(), /offline/);
+  assert.deepEqual(applied, [["cached"]]);
+});
 
 test("maps the server Track DTO and preserves metadata-only state", () => {
   const track = mapTrackDto(DTO);

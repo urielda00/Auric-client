@@ -9,6 +9,7 @@ async function restorePlaybackSnapshot({
   isPlayable,
   normalizePosition,
   playbackFailureMessage,
+  loadAudio = true,
 }) {
   const tracks = [
     snapshot.current?.track,
@@ -48,14 +49,15 @@ async function restorePlaybackSnapshot({
     positionMs,
     durationMs: track.durationMs || 0,
     isPlaying: false,
-    isBuffering: true,
-    isLoading: true,
+    isBuffering: loadAudio,
+    isLoading: loadAudio,
     playbackError: null,
     playbackContext: snapshot.current.context,
     shuffleMode: snapshot.shuffleMode || null,
     playedItems,
     playedStack: playedItems.map((item) => item.trackId),
   });
+  if (!loadAudio) return true;
   try {
     await audioEngine.load(track);
     if (getCurrentTrackId() !== trackId) return false;

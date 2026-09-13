@@ -101,6 +101,12 @@ export const statsService = {
     const result = await statsLoader.load(options);
     return present(result.value, result.cached);
   },
+
+  async getCachedStats() {
+    if (!remote) return null;
+    const result = await statsLoader.loadCached();
+    return result ? present(result.value, true) : null;
+  },
 };
 
 export default statsService;

@@ -27,9 +27,11 @@ const TRACK = {
 };
 
 test("Quick Picks load maps server reasons and Track DTOs", async () => {
+  let requestOptions;
   const api = createRecommendationApi({
-    async get(path) {
+    async get(path, options) {
       assert.equal(path, "/api/v1/recommendations/quick-picks");
+      requestOptions = options;
       return {
         data: [
           { track: TRACK, reason: "loved", reason_label: "You love this" },
@@ -37,9 +39,10 @@ test("Quick Picks load maps server reasons and Track DTOs", async () => {
       };
     },
   });
-  const picks = await api.quickPicks();
+  const picks = await api.quickPicks({ seed: 42 });
   assert.equal(picks[0].track.durationMs, 100000);
   assert.equal(picks[0].label, "You love this");
+  assert.deepEqual(requestOptions.query, { seed: 42 });
 });
 
 test("Smart and Random request separate server capabilities", async () => {
@@ -174,4 +177,21 @@ test("Quick Picks and Stats loaders cache success and use it only for offline fa
     saveCache: async () => {},
   });
   await assert.rejects(noCache.load(), /offline/);
+});
+
+test("cached Home data is available before its remote refresh settles", async () => {
+  let resolveRemote;
+  const remote = new Promise((resolve) => {
+    resolveRemote = resolve;
+  });
+  const loader = createCachedRemoteLoader({
+    loadRemote: () => remote,
+    loadCache: async () => ({ count: 7 }),
+    saveCache: async () => {},
+  });
+  const cached = await loader.loadCached();
+  const refresh = loader.load();
+  assert.deepEqual(cached, { value: { count: 7 }, cached: true });
+  resolveRemote({ count: 8 });
+  assert.deepEqual(await refresh, { value: { count: 8 }, cached: false });
 });

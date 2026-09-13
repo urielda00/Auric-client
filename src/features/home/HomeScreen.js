@@ -39,7 +39,9 @@ export default function HomeScreen() {
     activeRequest.current?.abort();
     const controller = new AbortController();
     activeRequest.current = controller;
-    setPicksStatus("loading");
+    setPicksStatus((status) =>
+      status === "idle" || status === "error" ? "loading" : status,
+    );
     try {
       const data = await recommendationService.getQuickPicks(nextSeed, {
         signal: controller.signal,
@@ -65,14 +67,36 @@ export default function HomeScreen() {
 
   useEffect(() => {
     const gate = requestGate.current;
+    let cancelled = false;
     if (tracksHydrated) {
-      loadPicks(seed);
-      statsService
-        .getStats()
-        .then(setStats)
-        .catch(() => {});
+      void (async () => {
+        const [cachedPicks, cachedStats] = await Promise.all([
+          recommendationService.getCachedQuickPicks(),
+          statsService.getCachedStats(),
+        ]);
+        if (cancelled) return;
+        if (cachedPicks) {
+          useLibraryStore
+            .getState()
+            .cacheTracks([
+              ...cachedPicks.cards.map((item) => item.track),
+              ...cachedPicks.rows.map((item) => item.track),
+            ]);
+          setPicks(cachedPicks);
+          setPicksStatus("cached");
+        }
+        if (cachedStats) setStats(cachedStats);
+        void loadPicks(seed);
+        void statsService
+          .getStats()
+          .then((freshStats) => {
+            if (!cancelled) setStats(freshStats);
+          })
+          .catch(() => {});
+      })();
     }
     return () => {
+      cancelled = true;
       gate.invalidate();
       activeRequest.current?.abort();
     };

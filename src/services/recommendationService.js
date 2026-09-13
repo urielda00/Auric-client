@@ -24,7 +24,7 @@ const REASON_META = {
 
 function seededShuffle(list, seed) {
   const items = [...list];
-  let state = seed || 1;
+  let state = seed >>> 0;
   const random = () => {
     state = (state * 9301 + 49297) % 233280;
     return state / 233280;
@@ -108,11 +108,21 @@ export const recommendationService = {
 
   async getQuickPicks(seed = 0, { signal } = {}) {
     if (!remote) return mockQuickPicks(seed);
-    const result = await quickPicksLoader.load({ signal });
+    const result = await quickPicksLoader.load({ seed, signal });
     const picks = Array.isArray(result.value)
       ? layout(result.value)
       : result.value;
     return { ...picks, cached: result.cached };
+  },
+
+  async getCachedQuickPicks() {
+    if (!remote) return null;
+    const result = await quickPicksLoader.loadCached();
+    if (!result) return null;
+    const picks = Array.isArray(result.value)
+      ? layout(result.value)
+      : result.value;
+    return { ...picks, cached: true };
   },
 
   async getSmartShuffleQueue(count = 30, options = {}) {

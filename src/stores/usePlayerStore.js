@@ -49,6 +49,8 @@ const checkpointGate = createCheckpointGate(CHECKPOINT_INTERVAL_MS);
 let activationSequence = 0;
 const recommendationRequests = createRecommendationRequestCoordinator();
 let queueRefillCoordinator = null;
+let localHydration = null;
+let backgroundReconciliation = null;
 
 function contextFor(type, label) {
   return { type, label };
@@ -99,7 +101,7 @@ export const usePlayerStore = create((set, get) => ({
       void get().ensureQueueDepth();
     });
     playbackStateService.setConflictHandler((snapshot) =>
-      applyRestoredSnapshot(set, get, snapshot),
+      applyRestoredSnapshot(set, get, snapshot, { loadAudio: false }),
     );
     audioEngine.setOnStatus((status) => {
       if (!isCurrentPlaybackEvent(status, get().currentTrackId)) return;
@@ -134,13 +136,42 @@ export const usePlayerStore = create((set, get) => ({
       }),
     );
 
-    await listeningTracker.recoverPending();
-    const restored = await playbackStateService.hydrate();
-    if (restored.snapshot && restored.source !== "local-stale-hydration") {
-      await applyRestoredSnapshot(set, get, restored.snapshot);
+    localHydration = await playbackStateService.hydrateLocal();
+    if (localHydration.snapshot) {
+      await applyRestoredSnapshot(set, get, localHydration.snapshot, {
+        loadAudio: false,
+        refillQueue: false,
+      });
     }
     set({ hydrated: true, isPlaying: false });
-    void get().ensureQueueDepth();
+  },
+
+  reconcileInBackground() {
+    if (backgroundReconciliation) return backgroundReconciliation;
+    const local = localHydration;
+    const request = Promise.allSettled([
+      listeningTracker.recoverPending(),
+      playbackStateService
+        .reconcile(local?.snapshot, local?.generation)
+        .then((restored) => {
+          if (
+            restored.snapshot &&
+            restored.source !== "local-stale-hydration"
+          ) {
+            return applyRestoredSnapshot(set, get, restored.snapshot, {
+              loadAudio: false,
+            });
+          }
+          return false;
+        }),
+    ]);
+    const shared = request.finally(() => {
+      if (backgroundReconciliation === shared) {
+        backgroundReconciliation = null;
+      }
+    });
+    backgroundReconciliation = shared;
+    return shared;
   },
 
   getCurrentTrack() {
@@ -210,6 +241,20 @@ export const usePlayerStore = create((set, get) => ({
       }
     } else {
       try {
+        const status = audioEngine.getStatus();
+        if (
+          status.trackId !== get().currentTrackId ||
+          status.isLoaded !== true
+        ) {
+          const track = get().getCurrentTrack();
+          if (!track || !isTrackPlayable(track)) return;
+          const restoredPosition = get().positionMs;
+          const expectedTrackId = track.id;
+          set({ isLoading: true, isBuffering: true, playbackError: null });
+          await audioEngine.load(track);
+          if (get().currentTrackId !== expectedTrackId) return;
+          await audioEngine.seekTo(restoredPosition);
+        }
         await audioEngine.play();
       } catch {
         listeningTracker.end("error", get().positionMs);
@@ -491,7 +536,12 @@ async function persistPlaybackState(state, mode) {
   }
 }
 
-async function applyRestoredSnapshot(set, get, snapshot) {
+async function applyRestoredSnapshot(
+  set,
+  get,
+  snapshot,
+  { loadAudio = true, refillQueue = true } = {},
+) {
   activationSequence += 1;
   const restored = await restorePlaybackSnapshot({
     snapshot,
@@ -504,8 +554,9 @@ async function applyRestoredSnapshot(set, get, snapshot) {
     isPlayable: isTrackPlayable,
     normalizePosition: normalizeRestoredPosition,
     playbackFailureMessage,
+    loadAudio,
   });
-  void get().ensureQueueDepth();
+  if (refillQueue) void get().ensureQueueDepth();
   return restored;
 }
 

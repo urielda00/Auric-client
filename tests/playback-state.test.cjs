@@ -137,6 +137,18 @@ test("hydrates from the server and keeps the local snapshot only as fallback", a
   assert.equal(fallback.snapshot.positionMs, 7777);
 });
 
+test("local playback hydration completes while remote reconciliation is unresolved", async () => {
+  const never = new Promise(() => {});
+  const coordinator = createPlaybackSyncCoordinator({
+    enabled: true,
+    storage: memoryStorage(localSnapshot({ positionMs: 2468 })),
+    api: { get: () => never },
+  });
+  const local = await coordinator.hydrateLocal();
+  assert.equal(local.source, "local");
+  assert.equal(local.snapshot.positionMs, 2468);
+});
+
 test("bootstraps an untouched server once from durable legacy local state", async () => {
   const local = localSnapshot({ positionMs: 4321 });
   const writes = [];
@@ -375,6 +387,37 @@ test("restores current, queue, played stack, and saved position paused", async (
     calls.some((call) => call[0] === "play"),
     false,
   );
+});
+
+test("restores playback UI without loading network audio", async () => {
+  const snapshot = mapPlaybackSnapshot(dto());
+  let state = {};
+  let loads = 0;
+  const restored = await restorePlaybackSnapshot({
+    snapshot,
+    getTrack: () => null,
+    cacheTracks: () => {},
+    hydrateQueue: () => {},
+    setPlayer: (next) => {
+      state = { ...state, ...next };
+    },
+    getCurrentTrackId: () => state.currentTrackId,
+    audioEngine: {
+      async load() {
+        loads += 1;
+      },
+      async seekTo() {},
+    },
+    isPlayable: (track) => track.hasMedia,
+    normalizePosition: (position, duration) => Math.min(position, duration),
+    playbackFailureMessage: () => "failed",
+    loadAudio: false,
+  });
+  assert.equal(restored, true);
+  assert.equal(loads, 0);
+  assert.equal(state.currentTrackId, TRACK_DTO.id);
+  assert.equal(state.positionMs, 12345);
+  assert.equal(state.isLoading, false);
 });
 
 test("checkpoint cadence is bounded while explicit seek/background flushes can force it", () => {

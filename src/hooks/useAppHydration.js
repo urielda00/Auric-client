@@ -25,7 +25,16 @@ export function useAppHydration(enabled = true) {
         // Individual stores/services retain their safe cached state. Auth failures are
         // handled centrally; an offline server must not trap the app on its splash.
       } finally {
-        if (!cancelled) setReady(true);
+        if (!cancelled) {
+          setReady(true);
+          const library = useLibraryStore.getState();
+          void Promise.all([
+            library.refreshLibrary(),
+            library.refreshLikes(),
+            library.refreshHistory(),
+            usePlayerStore.getState().reconcileInBackground(),
+          ]);
+        }
       }
     })();
     return () => {

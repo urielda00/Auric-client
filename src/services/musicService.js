@@ -7,6 +7,9 @@ import { serverApi } from "./serverApi";
 
 const { mapTrackDto } = require("./trackMapper.cjs");
 const { createTrackStreamSource } = require("./audio/streamSource.cjs");
+const {
+  createLibraryCacheCoordinator,
+} = require("./libraryCacheCoordinator.cjs");
 
 /**
  * The library data source. Every other service reads tracks through here.
@@ -22,6 +25,32 @@ const remoteTracks = new Map();
 let hydrated = false;
 let hydratingPromise = null;
 const apiClient = serverApi;
+
+async function fetchRemoteLibrary() {
+  const items = [];
+  let cursor;
+  do {
+    const response = await apiClient.get("/api/v1/tracks", {
+      query: { cursor, limit: 100 },
+    });
+    const page = response.data.map(mapTrackDto);
+    page.forEach((track) => remoteTracks.set(track.id, track));
+    items.push(...page);
+    cursor = response.meta?.nextCursor || undefined;
+  } while (cursor);
+  return items;
+}
+
+const libraryCache = apiClient
+  ? createLibraryCacheCoordinator({
+      loadCache: () => loadJSON(STORAGE_KEYS.library, []),
+      saveCache: (value) => saveJSON(STORAGE_KEYS.library, value),
+      loadRemote: fetchRemoteLibrary,
+      apply: (tracks) => {
+        library = tracks;
+      },
+    })
+  : null;
 
 async function ensureHydrated() {
   if (hydrated) return;
@@ -92,33 +121,29 @@ export const musicService = {
   },
 
   async getAllTracks() {
-    if (apiClient) {
-      try {
-        const items = [];
-        let cursor;
-        do {
-          const page = await this.getLibraryPage({ cursor, limit: 100 });
-          items.push(...page.items);
-          cursor = page.nextCursor || undefined;
-        } while (cursor);
-        library = items;
-        await saveJSON(STORAGE_KEYS.library, items);
-        return items;
-      } catch (error) {
-        const cached = await loadJSON(STORAGE_KEYS.library, []);
-        if (Array.isArray(cached) && cached.length) {
-          library = cached;
-          return cached;
-        }
-        throw error;
-      }
-    }
-    await ensureHydrated();
+    await this.hydrateLibraryCache();
     return library;
   },
 
+  async hydrateLibraryCache() {
+    if (!libraryCache) {
+      await ensureHydrated();
+      return library;
+    }
+    await libraryCache.hydrateCache();
+    return library;
+  },
+
+  async refreshLibrary() {
+    if (!libraryCache) {
+      await ensureHydrated();
+      return { tracks: library, applied: true };
+    }
+    return libraryCache.refresh();
+  },
+
   async getTrackById(id) {
-    await ensureHydrated();
+    await this.hydrateLibraryCache();
     const local = library.find((t) => t.id === id) || remoteTracks.get(id);
     if (local || !apiClient) return local || null;
     const response = await apiClient.get(
@@ -130,7 +155,7 @@ export const musicService = {
   },
 
   async getTracksByIds(ids) {
-    await ensureHydrated();
+    await this.hydrateLibraryCache();
     const byId = new Map(
       [...library, ...remoteTracks.values()].map((t) => [t.id, t]),
     );
@@ -138,13 +163,14 @@ export const musicService = {
   },
 
   async getTrackCount() {
-    await ensureHydrated();
+    await this.hydrateLibraryCache();
     return library.length;
   },
 
   /** Used by Add Music once a mock "download" reaches Ready. */
   async addTrack(input) {
     await ensureHydrated();
+    libraryCache?.markLocalChange();
     const id = generateId("add");
     const track = {
       id,

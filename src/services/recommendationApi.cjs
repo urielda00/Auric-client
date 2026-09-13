@@ -50,8 +50,9 @@ function mapGeneratedQueue(value) {
 
 function createRecommendationApi(client) {
   return {
-    async quickPicks({ signal } = {}) {
+    async quickPicks({ seed, signal } = {}) {
       const response = await client.get("/api/v1/recommendations/quick-picks", {
+        query: seed === undefined ? undefined : { seed },
         signal,
       });
       if (!Array.isArray(response.data))

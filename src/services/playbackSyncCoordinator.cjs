@@ -57,6 +57,48 @@ function createPlaybackSyncCoordinator({ api, storage, enabled }) {
     return result;
   };
 
+  const hydrateLocal = async () => {
+    const hydrationGeneration = generation;
+    const local = await storage.load();
+    revision = local?.revision ?? 0;
+    return { snapshot: local, source: "local", generation: hydrationGeneration };
+  };
+
+  const reconcile = async (localSnapshot, startedAtGeneration = generation) => {
+    const local = localSnapshot ?? (await storage.load());
+    revision = local?.revision ?? 0;
+    if (!enabled) return { snapshot: local, source: "local" };
+    try {
+      const remote = await api.get();
+      if (startedAtGeneration !== generation) {
+        return { snapshot: local, source: "local-stale-hydration" };
+      }
+      revision = remote.revision;
+      const remoteIsPristine =
+        remote.revision === 0 &&
+        remote.current === null &&
+        remote.upcoming.length === 0 &&
+        remote.played.length === 0;
+      const localHasState =
+        local?.current != null ||
+        (local?.upcoming?.length ?? 0) > 0 ||
+        (local?.played?.length ?? 0) > 0;
+      if (remoteIsPristine && localHasState) {
+        const seeded = await api.replace(local, 0);
+        revision = seeded.revision;
+        if (startedAtGeneration !== generation) {
+          return { snapshot: local, source: "local-stale-hydration" };
+        }
+        await save(seeded);
+        return { snapshot: seeded, source: "local-bootstrap" };
+      }
+      await save(remote);
+      return { snapshot: remote, source: "server" };
+    } catch {
+      return { snapshot: local, source: "offline" };
+    }
+  };
+
   return {
     get enabled() {
       return enabled;
@@ -71,37 +113,11 @@ function createPlaybackSyncCoordinator({ api, storage, enabled }) {
       generation += 1;
       return generation;
     },
+    hydrateLocal,
+    reconcile,
     async hydrate() {
-      const startedAtGeneration = generation;
-      const local = await storage.load();
-      revision = local?.revision ?? 0;
-      if (!enabled) return { snapshot: local, source: "local" };
-      try {
-        const remote = await api.get();
-        revision = remote.revision;
-        if (startedAtGeneration !== generation) {
-          return { snapshot: local, source: "local-stale-hydration" };
-        }
-        const remoteIsPristine =
-          remote.revision === 0 &&
-          remote.current === null &&
-          remote.upcoming.length === 0 &&
-          remote.played.length === 0;
-        const localHasState =
-          local?.current != null ||
-          (local?.upcoming?.length ?? 0) > 0 ||
-          (local?.played?.length ?? 0) > 0;
-        if (remoteIsPristine && localHasState) {
-          const seeded = await api.replace(local, 0);
-          revision = seeded.revision;
-          await save(seeded);
-          return { snapshot: seeded, source: "local-bootstrap" };
-        }
-        await save(remote);
-        return { snapshot: remote, source: "server" };
-      } catch {
-        return { snapshot: local, source: "offline" };
-      }
+      const local = await hydrateLocal();
+      return reconcile(local.snapshot, local.generation);
     },
     replace(snapshot) {
       const operationGeneration = ++generation;

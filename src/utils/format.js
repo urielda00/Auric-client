@@ -1,5 +1,7 @@
 /** Formatting + text-normalization helpers shared across screens and services. */
 
+const { normalizeSearch } = require('./searchNormalization.cjs');
+
 /** ms -> "3:41" */
 export function formatDuration(ms) {
   const totalSeconds = Math.max(0, Math.floor(ms / 1000));
@@ -8,16 +10,8 @@ export function formatDuration(ms) {
   return `${m}:${String(s).padStart(2, '0')}`;
 }
 
-/** NFD-normalize, strip diacritics, lowercase, drop punctuation -> plain search key. */
-export function normalizeSearch(str) {
-  return String(str)
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[̀-ͯ]/g, '')
-    .replace(/[^a-z0-9 ]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
+/** Unicode-aware, case-folded, punctuation-insensitive search key. */
+export { normalizeSearch };
 
 export function joinArtists(artists) {
   return (artists || []).join(', ');

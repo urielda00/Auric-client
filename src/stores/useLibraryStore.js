@@ -9,6 +9,7 @@ const {
 
 /** Canonical client cache for library Tracks, likes, and product History. */
 export const useLibraryStore = create((set, get) => {
+  let libraryRequestVersion = 0;
   let likesRequestVersion = 0;
   let historyRequestVersion = 0;
 
@@ -47,15 +48,36 @@ export const useLibraryStore = create((set, get) => {
     historyError: null,
     historyNextCursor: null,
     hydrated: false,
+    libraryStatus: 'idle',
+    libraryError: null,
 
     async hydrate() {
-      const tracks = await musicService.getAllTracks();
+      const tracks = await musicService.hydrateLibraryCache();
       set({
         tracks,
         tracksById: Object.fromEntries(tracks.map((track) => [track.id, track])),
+        hydrated: true,
       });
-      await Promise.all([get().refreshLikes(), get().refreshHistory()]);
-      set({ hydrated: true });
+    },
+
+    async refreshLibrary() {
+      const requestVersion = ++libraryRequestVersion;
+      set({ libraryStatus: 'loading', libraryError: null });
+      try {
+        const result = await musicService.refreshLibrary();
+        if (requestVersion !== libraryRequestVersion || !result.applied) return;
+        set({
+          tracks: result.tracks,
+          tracksById: Object.fromEntries(
+            result.tracks.map((track) => [track.id, track]),
+          ),
+          libraryStatus: 'success',
+        });
+      } catch (error) {
+        if (requestVersion === libraryRequestVersion) {
+          set({ libraryStatus: 'error', libraryError: error });
+        }
+      }
     },
 
     getTrackById(id) {
@@ -166,6 +188,7 @@ export const useLibraryStore = create((set, get) => {
     },
 
     async addTrack(input) {
+      libraryRequestVersion += 1;
       const track = await musicService.addTrack(input);
       set((state) => ({
         tracks: [track, ...state.tracks],
