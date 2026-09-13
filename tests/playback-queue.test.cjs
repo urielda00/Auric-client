@@ -4,11 +4,22 @@ const test = require("node:test");
 const {
   DEFAULT_QUEUE_TARGET,
   appendUniqueEntries,
+  commitAfterActivation,
   createQueueRefillCoordinator,
   moveTrackToFront,
   startDirectPlayback,
   takeNextWithEmergency,
 } = require("../src/services/playbackQueuePolicy.cjs");
+const {
+  NATIVE_SUCCESSOR_COUNT,
+  appendAdvancedHistory,
+  buildNativeProjection,
+  buildPreviousQueue,
+  classifyPlaybackError,
+  consumeNativeTransition,
+  createIdempotentTransitionTracker,
+  createTransitionGate,
+} = require("../src/services/audio/nativeQueuePolicy.cjs");
 const {
   canOfferTrackActions,
   createExclusivePressHandlers,
@@ -108,7 +119,7 @@ test("long press invokes track actions without also invoking normal playback", (
   assert.equal(calls.at(-1), "play");
 });
 
-test("direct play resets stale queue and starts smart continuation without awaiting it", async () => {
+test("direct play commits queue replacement only after activation succeeds", async () => {
   const order = [];
   let resolveRefill;
   const refill = new Promise((resolve) => {
@@ -126,8 +137,208 @@ test("direct play resets stale queue and starts smart continuation without await
     },
   });
   assert.equal(await directPlay, true);
-  assert.deepEqual(order, ["reset", "activate", "refill"]);
+  assert.deepEqual(order, ["activate", "reset", "refill"]);
   resolveRefill(true);
+
+  const preserved = ["keep"];
+  const failed = await startDirectPlayback({
+    resetQueue: () => preserved.splice(0),
+    activate: async () => false,
+    refill: async () => {},
+  });
+  assert.equal(failed, false);
+  assert.deepEqual(preserved, ["keep"]);
+});
+
+test("failed queued activation preserves the logical item until commit", async () => {
+  const queue = [entry("queued")];
+  const result = await commitAfterActivation({
+    activate: async () => false,
+    commit: () => queue.shift(),
+  });
+  assert.equal(result, false);
+  assert.deepEqual(queue.map((item) => item.trackId), ["queued"]);
+});
+
+test("native projection is current plus three playable successors and stays bounded", () => {
+  const logical = [
+    entry("one"),
+    entry("missing"),
+    entry("two"),
+    entry("three"),
+    entry("four"),
+  ];
+  const tracks = Object.fromEntries(
+    ["one", "two", "three", "four"].map((id) => [id, playable(id)]),
+  );
+  const before = JSON.parse(JSON.stringify(logical));
+  const projection = buildNativeProjection({
+    current: {
+      track: playable("current"),
+      itemId: "current-item",
+      context: { type: "direct", label: "Library" },
+    },
+    upcoming: logical,
+    getTrack: (id) => tracks[id],
+    isPlayable,
+  });
+  assert.equal(projection.length, NATIVE_SUCCESSOR_COUNT + 1);
+  assert.deepEqual(
+    projection.map((item) => item.track.id),
+    ["current", "one", "two", "three"],
+  );
+  assert.deepEqual(logical, before);
+});
+
+test("Play Next, reorder, and remove derive a new successor projection without changing current", () => {
+  const current = { track: playable("current"), itemId: "current-item" };
+  const first = buildNativeProjection({
+    current,
+    upcoming: [entry("a"), entry("b"), entry("c")],
+    getTrack: playable,
+    isPlayable,
+  });
+  const edited = buildNativeProjection({
+    current,
+    upcoming: [entry("play-next"), entry("c"), entry("a")],
+    getTrack: playable,
+    isPlayable,
+  });
+  assert.equal(first[0].itemId, edited[0].itemId);
+  assert.deepEqual(
+    edited.slice(1).map((item) => item.track.id),
+    ["play-next", "c", "a"],
+  );
+});
+
+test("rapid repeated Next shares one transition operation", async () => {
+  const gate = createTransitionGate();
+  let calls = 0;
+  let finish;
+  const pending = new Promise((resolve) => {
+    finish = resolve;
+  });
+  const first = gate.run(async () => {
+    calls += 1;
+    return pending;
+  });
+  const second = gate.run(async () => {
+    calls += 1;
+  });
+  assert.equal(first, second);
+  await Promise.resolve();
+  assert.equal(calls, 1);
+  finish(true);
+  assert.equal(await first, true);
+});
+
+test("native advancement consumes the first logical item exactly once", () => {
+  const queue = [entry("next"), entry("later")];
+  const event = {
+    previousItemId: "current-item",
+    itemId: queue[0].id,
+    trackId: "next",
+  };
+  const transition = consumeNativeTransition({
+    currentItemId: "current-item",
+    event,
+    queueEntries: queue,
+  });
+  assert.equal(transition.accepted, true);
+  assert.deepEqual(transition.remaining.map((item) => item.trackId), ["later"]);
+  const stale = consumeNativeTransition({
+    currentItemId: queue[0].id,
+    event,
+    queueEntries: transition.remaining,
+  });
+  assert.equal(stale.accepted, false);
+});
+
+test("delayed background reconciliation consumes every native hop exactly once", () => {
+  const queue = [entry("next-1"), entry("next-2"), entry("next-3")];
+  const transition = consumeNativeTransition({
+    currentItemId: "item-current",
+    event: {
+      previousItemId: queue[0].id,
+      itemId: queue[1].id,
+      trackId: "next-2",
+      nativeItemIds: ["item-current", queue[0].id, queue[1].id],
+    },
+    queueEntries: queue,
+  });
+  assert.equal(transition.accepted, true);
+  assert.equal(transition.entry.trackId, "next-2");
+  assert.deepEqual(
+    transition.advancedEntries.map((item) => item.trackId),
+    ["next-1", "next-2"],
+  );
+  assert.deepEqual(transition.remaining.map((item) => item.trackId), ["next-3"]);
+
+  const history = appendAdvancedHistory({
+    current: {
+      id: "item-current",
+      trackId: "current",
+      context: { type: "direct", label: "Library" },
+    },
+    advancedEntries: transition.advancedEntries,
+  });
+  assert.deepEqual(history.playedStack, ["current", "next-1"]);
+  assert.deepEqual(
+    history.playedItems.map((item) => item.trackId),
+    ["current", "next-1"],
+  );
+
+  const previousItem = history.playedItems.at(-1);
+  const previousQueue = buildPreviousQueue(
+    {
+      id: queue[1].id,
+      trackId: "next-2",
+      context: queue[1].context,
+    },
+    transition.remaining,
+  );
+  assert.equal(previousItem.trackId, "next-1");
+  assert.deepEqual(previousQueue.map((item) => item.trackId), [
+    "next-2",
+    "next-3",
+  ]);
+  assert.equal(
+    new Set(previousQueue.map((item) => item.id)).size,
+    previousQueue.length,
+  );
+});
+
+test("background transition synchronization is idempotent", () => {
+  const tracker = createIdempotentTransitionTracker();
+  assert.equal(tracker.accept("current->next"), true);
+  assert.equal(tracker.accept("current->next"), false);
+  assert.equal(tracker.accept("next->later"), true);
+});
+
+test("Previous stages the current item first without duplicating played history", () => {
+  const current = {
+    id: "current-item",
+    trackId: "current",
+    context: { type: "search", label: "Search" },
+  };
+  const result = buildPreviousQueue(current, [entry("later"), entry("current")]);
+  assert.deepEqual(result.map((item) => item.trackId), ["current", "later"]);
+  assert.equal(result[0].id, "current-item");
+});
+
+test("native auth errors are non-retryable while network errors remain retryable", () => {
+  assert.deepEqual(
+    classifyPlaybackError({ code: "source", message: "Response code 401" }),
+    {
+      code: "AUTHENTICATION_REQUIRED",
+      kind: "authentication",
+      retryable: false,
+    },
+  );
+  assert.equal(
+    classifyPlaybackError({ code: "network", message: "offline" }).retryable,
+    true,
+  );
 });
 
 test("a low queue refills to the rolling target while a healthy queue makes no request", async () => {

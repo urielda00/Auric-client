@@ -46,13 +46,22 @@ function filterRecommendationBatch(tracks, excludedIds, capacity, isPlayable) {
   return result;
 }
 
-function startDirectPlayback({ resetQueue, activate, refill }) {
-  resetQueue();
+function commitAfterActivation({ activate, commit }) {
   return Promise.resolve(activate()).then((activated) => {
     if (activated !== false) {
-      Promise.resolve(refill()).catch(() => {});
+      commit();
     }
     return activated;
+  });
+}
+
+function startDirectPlayback({ resetQueue, activate, refill }) {
+  return commitAfterActivation({
+    activate,
+    commit: () => {
+      resetQueue();
+      Promise.resolve(refill()).catch(() => {});
+    },
   });
 }
 
@@ -182,6 +191,7 @@ module.exports = {
   DEFAULT_REFILL_THRESHOLD,
   appendUniqueEntries,
   buildRefillExclusions,
+  commitAfterActivation,
   createQueueRefillCoordinator,
   filterRecommendationBatch,
   moveTrackToFront,

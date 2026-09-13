@@ -68,7 +68,6 @@ export default function QueueScreen() {
   const handlePlay = (item, index) => {
     const queueIndex = getUpcomingMutationIndex(timeline.upcoming, index);
     if (queueIndex < 0) return;
-    removeAt(queueIndex, { persist: false, refill: false });
     playQueued(item.trackId, item.context || playbackContext, item.id);
   };
 

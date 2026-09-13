@@ -15,10 +15,14 @@ export class MockAudioEngine extends AudioEngine {
     this.isPlaying = false;
     this.onStatus = null;
     this.onEnded = null;
+    this.onTrackChanged = null;
+    this.onRemoteNext = null;
+    this.onRemotePrevious = null;
+    this.projection = [];
     this.timer = null;
   }
 
-  load(track) {
+  load(track, options = {}) {
     if (!track || track.hasMedia !== true)
       throw new Error("TRACK_HAS_NO_MEDIA");
     this._stopTimer();
@@ -26,6 +30,15 @@ export class MockAudioEngine extends AudioEngine {
     this.durationMs = track?.durationMs || 0;
     this.isPlaying = false;
     this.trackId = track.id;
+    this.itemId = options.currentItemId || track.id;
+    this.projection = [
+      {
+        track,
+        itemId: this.itemId,
+        context: options.context || null,
+      },
+      ...(options.upcoming || []).slice(0, 3),
+    ];
     this._emitStatus();
   }
 
@@ -34,6 +47,10 @@ export class MockAudioEngine extends AudioEngine {
     this.isPlaying = true;
     this._startTimer();
     this._emitStatus();
+  }
+
+  waitUntilReady() {
+    return Promise.resolve(true);
   }
 
   pause() {
@@ -47,12 +64,53 @@ export class MockAudioEngine extends AudioEngine {
     this._emitStatus();
   }
 
+  next(reason = "skipped_next") {
+    if (this.projection.length < 2) return Promise.resolve(false);
+    const previousTrackId = this.trackId;
+    const previousItemId = this.itemId;
+    const [, next, ...rest] = this.projection;
+    this.projection = [next, ...rest];
+    this.trackId = next.track.id;
+    this.itemId = next.itemId || next.id;
+    this.positionMs = 0;
+    this.durationMs = next.track.durationMs || 0;
+    this.onTrackChanged?.({
+      trackId: this.trackId,
+      itemId: this.itemId,
+      context: next.context || null,
+      previousTrackId,
+      previousItemId,
+      reason,
+      generation: 0,
+    });
+    this._emitStatus();
+    return Promise.resolve(true);
+  }
+
+  syncQueue(current, upcoming = []) {
+    if (!current?.track || current.itemId !== this.itemId) return false;
+    this.projection = [current, ...upcoming.slice(0, 3)];
+    return true;
+  }
+
   setOnStatus(fn) {
     this.onStatus = fn;
   }
 
   setOnEnded(fn) {
     this.onEnded = fn;
+  }
+
+  setOnTrackChanged(fn) {
+    this.onTrackChanged = fn;
+  }
+
+  setOnRemoteNext(fn) {
+    this.onRemoteNext = fn;
+  }
+
+  setOnRemotePrevious(fn) {
+    this.onRemotePrevious = fn;
   }
 
   getStatus() {
@@ -64,6 +122,7 @@ export class MockAudioEngine extends AudioEngine {
       isLoaded: this.durationMs > 0,
       error: null,
       trackId: this.trackId,
+      itemId: this.itemId,
       generation: 0,
     };
   }
@@ -72,6 +131,9 @@ export class MockAudioEngine extends AudioEngine {
     this._stopTimer();
     this.onStatus = null;
     this.onEnded = null;
+    this.onTrackChanged = null;
+    this.onRemoteNext = null;
+    this.onRemotePrevious = null;
   }
 
   _startTimer() {
@@ -83,6 +145,29 @@ export class MockAudioEngine extends AudioEngine {
         this.isPlaying = false;
         this._stopTimer();
         this._emitStatus();
+        if (this.projection.length > 1) {
+          const previousTrackId = this.trackId;
+          const previousItemId = this.itemId;
+          const [, next, ...rest] = this.projection;
+          this.projection = [next, ...rest];
+          this.trackId = next.track.id;
+          this.itemId = next.itemId || next.id;
+          this.positionMs = 0;
+          this.durationMs = next.track.durationMs || 0;
+          this.isPlaying = true;
+          this.onTrackChanged?.({
+            trackId: this.trackId,
+            itemId: this.itemId,
+            context: next.context || null,
+            previousTrackId,
+            previousItemId,
+            reason: "completed",
+            generation: 0,
+          });
+          this._startTimer();
+          this._emitStatus();
+          return;
+        }
         this.onEnded?.({ trackId: this.trackId, generation: 0 });
         return;
       }

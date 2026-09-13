@@ -10,6 +10,7 @@ const {
 const queueContext = (type, label) => ({ type, label });
 let persistenceHandler = null;
 let mutationHandler = null;
+let projectionHandler = null;
 
 export function setQueuePersistenceHandler(handler) {
   persistenceHandler = handler;
@@ -17,6 +18,10 @@ export function setQueuePersistenceHandler(handler) {
 
 export function setQueueMutationHandler(handler) {
   mutationHandler = handler;
+}
+
+export function setQueueProjectionHandler(handler) {
+  projectionHandler = handler;
 }
 
 function entry(trackId, context, id = generateUuid()) {
@@ -66,6 +71,7 @@ export const useQueueStore = create((set, get) => ({
     const state = derived(entries);
     set(state);
     queueService.setQueueState({ ids: state.ids, contexts: state.contexts });
+    projectionHandler?.();
     if (persist) persistenceHandler?.();
     if (refill) mutationHandler?.();
   },
@@ -76,6 +82,19 @@ export const useQueueStore = create((set, get) => ({
         entry(
           trackId,
           contexts[trackId] || queueContext("manual_queue", "Queue"),
+        ),
+      ),
+      options,
+    );
+  },
+
+  replaceEntries(entries, options) {
+    get()._commit(
+      entries.map((item) =>
+        entry(
+          item.trackId,
+          item.context || queueContext("manual_queue", "Queue"),
+          item.id,
         ),
       ),
       options,

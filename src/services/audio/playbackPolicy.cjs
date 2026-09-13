@@ -1,5 +1,6 @@
-function isCurrentPlaybackEvent(event, currentTrackId) {
-  return Boolean(event?.trackId && event.trackId === currentTrackId);
+function isCurrentPlaybackEvent(event, currentTrackId, currentItemId) {
+  if (!event?.trackId || event.trackId !== currentTrackId) return false;
+  return !event.itemId || !currentItemId || event.itemId === currentItemId;
 }
 
 function createCompletionHandler({ getCurrentTrackId, next }) {

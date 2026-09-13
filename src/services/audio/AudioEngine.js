@@ -1,16 +1,20 @@
 /**
  * AudioEngine — the playback boundary usePlayerStore talks to.
  *
- * MockAudioEngine keeps isolated UI work deterministic. ExpoAudioEngine implements the
- * same contract with the installed expo-audio native player for server-backed playback.
+ * MockAudioEngine keeps isolated UI work deterministic. TrackPlayerAudioEngine implements
+ * the same contract with a small native playback queue for server-backed playback.
  *
  * Every engine must implement:
- *   load(track)              -> prepare a track; resets position to 0, stays paused
+ *   load(track, options)     -> prepare current + bounded successors, stays paused
  *   play()                   -> resume/start playback
  *   pause()                  -> pause playback
  *   seekTo(ms)                -> jump to a position
+ *   next()                   -> request one native queue advancement
+ *   syncQueue(current, next) -> patch prepared successors without interrupting current
  *   setOnStatus(fn)           -> actual loading/buffering/playback status
- *   setOnEnded(fn)            -> fn() fires once when the loaded track completes
+ *   setOnTrackChanged(fn)     -> native-owned advancement accepted by the player
+ *   setOnRemoteNext(fn)       -> serialized notification/headset Next action
+ *   setOnEnded(fn)            -> fn() fires when the bounded native queue is exhausted
  *   getStatus()               -> { positionMs, durationMs, isPlaying }
  *   destroy()                 -> release timers/native resources
  */
@@ -28,7 +32,16 @@ export class AudioEngine {
   seekTo(/* ms */) {
     throw new Error("AudioEngine.seekTo not implemented");
   }
+  next() {
+    throw new Error("AudioEngine.next not implemented");
+  }
+  syncQueue(/* current, upcoming */) {
+    return false;
+  }
   setOnStatus(/* fn */) {}
+  setOnTrackChanged(/* fn */) {}
+  setOnRemoteNext(/* fn */) {}
+  setOnRemotePrevious(/* fn */) {}
   setOnEnded(/* fn */) {}
   getStatus() {
     return { positionMs: 0, durationMs: 0, isPlaying: false };

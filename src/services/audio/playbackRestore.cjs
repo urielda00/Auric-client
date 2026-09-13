@@ -59,7 +59,15 @@ async function restorePlaybackSnapshot({
   });
   if (!loadAudio) return true;
   try {
-    await audioEngine.load(track);
+    await audioEngine.load(track, {
+      currentItemId: snapshot.current.id,
+      context: snapshot.current.context,
+      upcoming: snapshot.upcoming.map((item) => ({
+        ...item,
+        itemId: item.id,
+        track: item.track || getTrack(item.trackId),
+      })),
+    });
     if (getCurrentTrackId() !== trackId) return false;
     await audioEngine.seekTo(positionMs);
     setPlayer({ isPlaying: false });

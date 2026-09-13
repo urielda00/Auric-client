@@ -1,18 +1,16 @@
 import { MockAudioEngine } from "./MockAudioEngine";
-import { ExpoAudioEngine } from "./ExpoAudioEngine";
+import { TrackPlayerAudioEngine } from "./TrackPlayerAudioEngine";
 import { apiConfig } from "../apiConfig";
 
 const { selectAudioEngine } = require("./engineSelection.cjs");
 
 /**
- * Active engine singleton. Swapping mock-for-real later is one line:
- *   import { ExpoAudioEngine } from './ExpoAudioEngine';
- *   export const audioEngine = new ExpoAudioEngine();
+ * Active engine singleton. Native-player details remain behind AudioEngine.
  */
 export const audioEngine = selectAudioEngine({
   useServer: apiConfig.useServer,
   createMock: () => new MockAudioEngine(),
-  createExpo: () => new ExpoAudioEngine(),
+  createNative: () => new TrackPlayerAudioEngine(),
 });
 
 export default audioEngine;
