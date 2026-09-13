@@ -1,6 +1,6 @@
 const PLAYED_ROW_HEIGHT = 58;
 
-function resolveEntry(entry, type, index, tracksById) {
+function resolveEntry(entry, type, tracksById) {
   const track = tracksById[entry.trackId];
   if (!track) return null;
   return {
@@ -9,7 +9,6 @@ function resolveEntry(entry, type, index, tracksById) {
     context: entry.context,
     track,
     type,
-    queueIndex: type === "upcoming" ? index : null,
   };
 }
 
@@ -23,7 +22,7 @@ function deriveQueueTimeline({
   tracksById = {},
 }) {
   const played = playedItems
-    .map((item, index) => resolveEntry(item, "played", index, tracksById))
+    .map((item) => resolveEntry(item, "played", tracksById))
     .filter(Boolean);
   const currentTrack = currentTrackId ? tracksById[currentTrackId] : null;
   const current = currentTrack
@@ -33,13 +32,10 @@ function deriveQueueTimeline({
         context: playbackContext,
         track: currentTrack,
         type: "current",
-        queueIndex: null,
       }
     : null;
   const upcoming = queueEntries
-    .map((item, index) =>
-      resolveEntry(item, "upcoming", index, tracksById),
-    )
+    .map((item) => resolveEntry(item, "upcoming", tracksById))
     .filter(Boolean);
 
   return { played, current, upcoming };
@@ -47,10 +43,6 @@ function deriveQueueTimeline({
 
 function getQueueInitialOffset(playedCount) {
   return Math.max(0, playedCount * PLAYED_ROW_HEIGHT);
-}
-
-function getUpcomingMutationIndex(upcoming, renderedIndex) {
-  return upcoming[renderedIndex]?.queueIndex ?? -1;
 }
 
 function createQueuePlaybackControls(toggle) {
@@ -64,5 +56,4 @@ module.exports = {
   createQueuePlaybackControls,
   deriveQueueTimeline,
   getQueueInitialOffset,
-  getUpcomingMutationIndex,
 };

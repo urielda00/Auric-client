@@ -1,5 +1,11 @@
-import React, { useMemo, useRef } from "react";
-import { View, Text, Pressable, ScrollView, StyleSheet } from "react-native";
+import React, { useCallback, useMemo, useRef } from "react";
+import { View, Text, Pressable, StyleSheet } from "react-native";
+import {
+  Gesture,
+  GestureDetector,
+  ScrollView,
+} from "react-native-gesture-handler";
+import { runOnJS } from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
 import { LinearGradient } from "expo-linear-gradient";
@@ -22,8 +28,10 @@ const {
   createQueuePlaybackControls,
   deriveQueueTimeline,
   getQueueInitialOffset,
-  getUpcomingMutationIndex,
 } = require("./queueTimeline.cjs");
+const {
+  createQueueDismissReleaseHandler,
+} = require("../player/queueSwipe.cjs");
 
 export default function QueueScreen() {
   const router = useRouter();
@@ -36,8 +44,8 @@ export default function QueueScreen() {
   const playbackContext = usePlayerStore((s) => s.playbackContext);
   const playedItems = usePlayerStore((s) => s.playedItems);
   const queueEntries = useQueueStore((s) => s.entries);
-  const move = useQueueStore((s) => s.move);
-  const removeAt = useQueueStore((s) => s.removeAt);
+  const moveEntry = useQueueStore((s) => s.moveEntry);
+  const removeEntry = useQueueStore((s) => s.removeEntry);
   const tracksById = useLibraryStore((s) => s.tracksById);
 
   const timeline = useMemo(
@@ -64,32 +72,44 @@ export default function QueueScreen() {
     x: 0,
     y: getQueueInitialOffset(timeline.played.length),
   });
+  const dismissQueue = useCallback(() => router.back(), [router]);
+  const releaseQueueDismiss = useMemo(
+    () => createQueueDismissReleaseHandler(dismissQueue),
+    [dismissQueue],
+  );
+  const queueDismissSwipe = Gesture.Pan()
+    .activeOffsetY([-7, 7])
+    .failOffsetX([-32, 32])
+    .onEnd((event) => {
+      runOnJS(releaseQueueDismiss)(
+        event.translationX,
+        event.translationY,
+        event.velocityY,
+      );
+    });
 
-  const handlePlay = (item, index) => {
-    const queueIndex = getUpcomingMutationIndex(timeline.upcoming, index);
-    if (queueIndex < 0) return;
+  const handlePlay = (item) => {
     playQueued(item.trackId, item.context || playbackContext, item.id);
   };
 
-  const handleReorder = (from, to) => {
-    const fromQueueIndex = getUpcomingMutationIndex(timeline.upcoming, from);
-    const toQueueIndex = getUpcomingMutationIndex(timeline.upcoming, to);
-    if (fromQueueIndex >= 0 && toQueueIndex >= 0) {
-      move(fromQueueIndex, toQueueIndex);
-    }
-  };
+  const handleReorder = (entryId, targetEntryId, placement) =>
+    moveEntry(entryId, targetEntryId, placement);
 
-  const handleRemove = (_item, index) => {
-    const queueIndex = getUpcomingMutationIndex(timeline.upcoming, index);
-    if (queueIndex >= 0) removeAt(queueIndex);
-  };
+  const handleRemove = (item) => removeEntry(item.id);
 
   return (
-    <Pressable style={styles.scrim} onPress={() => router.back()}>
-      <Pressable style={styles.sheet} onPress={() => {}}>
-        <View style={styles.grabberWrap}>
+    <View style={styles.scrim}>
+      <Pressable
+        accessibilityLabel="Close Queue"
+        onPress={dismissQueue}
+        style={styles.backdrop}
+      />
+      <View style={styles.sheet}>
+        <GestureDetector gesture={queueDismissSwipe}>
+          <View style={styles.grabberWrap}>
           <View style={styles.grabber} />
-        </View>
+          </View>
+        </GestureDetector>
         <View style={styles.headerRow}>
           <Text style={styles.headerTitle}>Queue</Text>
           <Pressable onPress={() => router.back()} hitSlop={8}>
@@ -126,6 +146,7 @@ export default function QueueScreen() {
         <ScrollView
           style={styles.timeline}
           contentOffset={initialOffset.current}
+          nestedScrollEnabled
           contentContainerStyle={[
             styles.listContent,
             { paddingBottom: 24 + insets.bottom },
@@ -182,8 +203,8 @@ export default function QueueScreen() {
             </Text>
           )}
         </ScrollView>
-      </Pressable>
-    </Pressable>
+      </View>
+    </View>
   );
 }
 
@@ -210,6 +231,9 @@ const styles = StyleSheet.create({
     justifyContent: "flex-end",
     backgroundColor: "rgba(4,4,7,0.6)",
   },
+  backdrop: {
+    ...StyleSheet.absoluteFillObject,
+  },
   sheet: {
     height: "92%",
     borderTopLeftRadius: 28,
@@ -220,9 +244,9 @@ const styles = StyleSheet.create({
     overflow: "hidden",
   },
   grabberWrap: {
+    height: 32,
     alignItems: "center",
-    paddingTop: 12,
-    paddingBottom: 4,
+    justifyContent: "center",
   },
   grabber: {
     width: 38,

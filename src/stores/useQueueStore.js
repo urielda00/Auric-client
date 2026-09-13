@@ -6,6 +6,10 @@ const {
   appendUniqueEntries,
   moveTrackToFront,
 } = require("../services/playbackQueuePolicy.cjs");
+const {
+  moveEntryRelative,
+  removeEntryById,
+} = require("../services/queueEntryPolicy.cjs");
 
 const queueContext = (type, label) => ({ type, label });
 let persistenceHandler = null;
@@ -148,6 +152,13 @@ export const useQueueStore = create((set, get) => ({
     );
   },
 
+  removeEntry(entryId, options) {
+    const result = removeEntryById(get().entries, entryId);
+    if (!result.changed) return false;
+    get()._commit(result.entries, options);
+    return true;
+  },
+
   removeId(trackId, options) {
     get()._commit(
       get().entries.filter((item) => item.trackId !== trackId),
@@ -162,6 +173,18 @@ export const useQueueStore = create((set, get) => ({
     const [moved] = entries.splice(from, 1);
     entries.splice(to, 0, moved);
     get()._commit(entries, options);
+  },
+
+  moveEntry(entryId, targetEntryId, placement, options) {
+    const result = moveEntryRelative(
+      get().entries,
+      entryId,
+      targetEntryId,
+      placement,
+    );
+    if (!result.changed) return false;
+    get()._commit(result.entries, options);
+    return true;
   },
 
   shiftEntry(options) {

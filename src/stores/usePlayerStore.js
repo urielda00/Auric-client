@@ -46,6 +46,9 @@ const {
   createIdempotentTransitionTracker,
   createTransitionGate,
 } = require("../services/audio/nativeQueuePolicy.cjs");
+const {
+  notifyExplicitPlaybackSelection,
+} = require("../features/player/playerNavigationIntent.cjs");
 
 const CHECKPOINT_INTERVAL_MS = 15000;
 const RESTART_THRESHOLD_MS = 4000;
@@ -310,7 +313,10 @@ export const usePlayerStore = create((set, get) => ({
         ),
       refill: () => get().ensureQueueDepth(),
     });
-    if (activated) void persistPlaybackState(get(), "replace");
+    if (activated) {
+      void persistPlaybackState(get(), "replace");
+      notifyExplicitPlaybackSelection(true);
+    }
     return activated;
   },
 
@@ -516,6 +522,7 @@ export const usePlayerStore = create((set, get) => ({
     });
     set({ shuffleMode: null });
     void get().ensureQueueDepth();
+    notifyExplicitPlaybackSelection(true);
     return true;
   },
 
@@ -547,6 +554,7 @@ export const usePlayerStore = create((set, get) => ({
     });
     set({ shuffleMode: null });
     void get().ensureQueueDepth();
+    notifyExplicitPlaybackSelection(true);
     return true;
   },
 

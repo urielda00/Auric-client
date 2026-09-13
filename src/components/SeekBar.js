@@ -5,32 +5,35 @@ import { LinearGradient } from "expo-linear-gradient";
 import { runOnJS } from "react-native-reanimated";
 import { gradients } from "../constants/theme";
 
+const { physicalSeekRatio } = require("../features/player/playerUxPolicy.cjs");
+
 /** Tap- or drag-to-seek progress bar used by the Full Player. */
 export default function SeekBar({ pct, onSeek, height = 4, thumbSize = 12 }) {
   const [width, setWidth] = useState(0);
   const [dragRatio, setDragRatio] = useState(null);
 
-  const ratioAtX = (x) => {
-    if (width <= 0) return;
-    return Math.max(0, Math.min(1, x / width));
-  };
-
   const previewAtX = (x) => {
-    const ratio = ratioAtX(x);
-    if (ratio !== undefined) setDragRatio(ratio);
+    const ratio = physicalSeekRatio(x, width);
+    if (ratio !== null) setDragRatio(ratio);
   };
   const commitAtX = (x) => {
-    const ratio = ratioAtX(x);
+    const ratio = physicalSeekRatio(x, width);
     setDragRatio(null);
-    if (ratio !== undefined) onSeek(ratio);
+    if (ratio !== null) onSeek(ratio);
   };
+  const clearPreview = () => setDragRatio(null);
 
   const pan = Gesture.Pan()
+    .minDistance(4)
     .onUpdate((e) => runOnJS(previewAtX)(e.x))
-    .onEnd((e) => runOnJS(commitAtX)(e.x));
+    .onEnd((e) => runOnJS(commitAtX)(e.x))
+    .onFinalize((_event, success) => {
+      if (!success) runOnJS(clearPreview)();
+    });
   const tap = Gesture.Tap().onEnd((e) => runOnJS(commitAtX)(e.x));
   const gesture = Gesture.Race(pan, tap);
-  const displayPct = dragRatio === null ? pct : dragRatio * 100;
+  const rawDisplayPct = dragRatio === null ? pct : dragRatio * 100;
+  const displayPct = Math.max(0, Math.min(100, rawDisplayPct || 0));
 
   return (
     <GestureDetector gesture={gesture}>
@@ -45,17 +48,23 @@ export default function SeekBar({ pct, onSeek, height = 4, thumbSize = 12 }) {
             end={{ x: 1, y: 0 }}
             style={[styles.fill, { width: `${displayPct}%` }]}
           />
-          <View
-            style={[
-              styles.thumb,
-              {
-                width: thumbSize,
-                height: thumbSize,
-                borderRadius: thumbSize / 2,
-                left: `${displayPct}%`,
-              },
-            ]}
-          />
+          <View pointerEvents="none" style={StyleSheet.absoluteFill}>
+            <View
+              style={[styles.thumbPosition, { width: `${displayPct}%` }]}
+            >
+              <View
+                style={[
+                  styles.thumb,
+                  {
+                    width: thumbSize,
+                    height: thumbSize,
+                    borderRadius: thumbSize / 2,
+                    transform: [{ translateX: thumbSize / 2 }],
+                  },
+                ]}
+              />
+            </View>
+          </View>
         </View>
       </View>
     </GestureDetector>
@@ -66,6 +75,7 @@ const styles = StyleSheet.create({
   hitStrip: {
     height: 22,
     justifyContent: "center",
+    direction: "ltr",
   },
   track: {
     width: "100%",
@@ -76,11 +86,12 @@ const styles = StyleSheet.create({
     height: "100%",
     borderRadius: 3,
   },
+  thumbPosition: {
+    height: "100%",
+    alignItems: "flex-end",
+    justifyContent: "center",
+  },
   thumb: {
-    position: "absolute",
-    top: "50%",
-    marginTop: -6,
-    marginLeft: -6,
     backgroundColor: "#fff",
     boxShadow: "0px 2px 8px rgba(0,0,0,0.5)",
     elevation: 4,

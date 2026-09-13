@@ -28,6 +28,10 @@ import { trackArt } from "../../utils/artwork";
 const {
   createQueueSwipeReleaseHandler,
 } = require("./queueSwipe.cjs");
+const {
+  bindPhysicalTransportActions,
+  seekPositionFromRatio,
+} = require("./playerUxPolicy.cjs");
 
 const { width: SCREEN_WIDTH } = Dimensions.get("window");
 const ART_SIZE = Math.min(SCREEN_WIDTH - 60, 420);
@@ -59,9 +63,13 @@ export default function FullPlayerScreen() {
     () => createQueueSwipeReleaseHandler(openQueue),
     [openQueue],
   );
+  const transportActions = useMemo(
+    () => bindPhysicalTransportActions({ previous, next }),
+    [next, previous],
+  );
   const queueSwipe = Gesture.Pan()
-    .activeOffsetY([-12, 12])
-    .failOffsetX([-20, 20])
+    .activeOffsetY([-7, 7])
+    .failOffsetX([-32, 32])
     .onEnd((event) => {
       runOnJS(releaseQueueSwipe)(
         event.translationX,
@@ -159,7 +167,10 @@ export default function FullPlayerScreen() {
       <View style={styles.progressZone}>
         <SeekBar
           pct={pct}
-          onSeek={(ratio) => seek(Math.round(ratio * durationMs))}
+          onSeek={(ratio) => {
+            const position = seekPositionFromRatio(ratio, durationMs);
+            if (position !== null) seek(position);
+          }}
         />
         <View style={styles.timeRow}>
           <Text style={styles.timeText}>{formatDuration(positionMs)}</Text>
@@ -188,7 +199,12 @@ export default function FullPlayerScreen() {
           { paddingBottom: Math.max(24, insets.bottom + 10) },
         ]}
       >
-        <Pressable onPress={previous} style={styles.sideBtn} hitSlop={8}>
+        <Pressable
+          accessibilityLabel="Previous"
+          onPress={transportActions.left}
+          style={styles.sideBtn}
+          hitSlop={8}
+        >
           <PrevGlyph />
         </Pressable>
         <Pressable onPress={toggle} style={styles.playBtn}>
@@ -198,7 +214,12 @@ export default function FullPlayerScreen() {
             <PlayTriangle size={22} color="#0B0B10" />
           )}
         </Pressable>
-        <Pressable onPress={next} style={styles.sideBtn} hitSlop={8}>
+        <Pressable
+          accessibilityLabel="Next"
+          onPress={transportActions.right}
+          style={styles.sideBtn}
+          hitSlop={8}
+        >
           <NextGlyph />
         </Pressable>
       </View>
@@ -272,6 +293,7 @@ const styles = StyleSheet.create({
   progressZone: {
     paddingHorizontal: 26,
     paddingTop: 16,
+    direction: "ltr",
   },
   timeRow: {
     flexDirection: "row",
@@ -309,6 +331,7 @@ const styles = StyleSheet.create({
   },
   transport: {
     flexDirection: "row",
+    direction: "ltr",
     alignItems: "center",
     justifyContent: "center",
     gap: 34,

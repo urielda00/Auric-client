@@ -1,9 +1,9 @@
-import React from "react";
+import React, { useEffect, useRef } from "react";
 import { View, Text, StyleSheet } from "react-native";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { StatusBar } from "expo-status-bar";
-import { Stack } from "expo-router";
+import { Stack, usePathname, useRouter } from "expo-router";
 import {
   useFonts,
   SpaceGrotesk_600SemiBold,
@@ -22,6 +22,38 @@ import { usePersistOnBackground } from "../src/hooks/usePersistOnBackground";
 import { colors } from "../src/constants/theme";
 import { PairingScreen } from "../src/features/pairing/PairingScreen";
 import { TrackActionsProvider } from "../src/components/TrackActionsMenu";
+
+const {
+  createPlayerNavigationIntentConsumer,
+  playerNavigationIntents,
+} = require("../src/features/player/playerNavigationIntent.cjs");
+
+function PlayerNavigationIntentListener() {
+  const pathname = usePathname();
+  const router = useRouter();
+  const navigateRef = useRef(() => {});
+  navigateRef.current = () => router.push("/player");
+  const consumerRef = useRef(null);
+  if (!consumerRef.current) {
+    consumerRef.current = createPlayerNavigationIntentConsumer({
+      navigate: () => navigateRef.current(),
+    });
+  }
+
+  useEffect(() => {
+    consumerRef.current.syncRoute(pathname);
+  }, [pathname]);
+
+  useEffect(
+    () =>
+      playerNavigationIntents.subscribe((intent) =>
+        consumerRef.current.consume(intent),
+      ),
+    [],
+  );
+
+  return null;
+}
 
 export default function RootLayout() {
   const [fontsLoaded] = useFonts({
@@ -60,6 +92,7 @@ export default function RootLayout() {
       <SafeAreaProvider>
         <StatusBar style="light" />
         <TrackActionsProvider>
+          <PlayerNavigationIntentListener />
           <Stack
             screenOptions={{
               headerShown: false,

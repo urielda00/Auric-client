@@ -1,26 +1,51 @@
-import React, { useRef } from 'react';
-import { View, Text, Pressable, StyleSheet } from 'react-native';
-import { Gesture, GestureDetector } from 'react-native-gesture-handler';
-import Animated, { useSharedValue, useAnimatedStyle, withTiming, runOnJS } from 'react-native-reanimated';
-import TrackArt from '../../components/TrackArt';
-import { GrabHandle, UpChevron, RemoveGlyph } from '../../components/icons/Glyphs';
-import { colors } from '../../constants/theme';
-import { trackDisplayTitle, joinArtists } from '../../utils/format';
+import React, { useRef } from "react";
+import { View, Text, Pressable, StyleSheet } from "react-native";
+import { Gesture, GestureDetector } from "react-native-gesture-handler";
+import Animated, {
+  useSharedValue,
+  useAnimatedStyle,
+  withTiming,
+  runOnJS,
+} from "react-native-reanimated";
+import TrackArt from "../../components/TrackArt";
+import { GrabHandle, RemoveGlyph } from "../../components/icons/Glyphs";
+import { colors } from "../../constants/theme";
+import { trackDisplayTitle, joinArtists } from "../../utils/format";
+
+const {
+  createQueueDragCoordinator,
+} = require("./dragReorderPolicy.cjs");
 
 const ROW_HEIGHT = 62;
 const ROW_GAP = 2;
 const SLOT = ROW_HEIGHT + ROW_GAP;
 
-/**
- * The queue's "Next up" list. Rows drag-reorder from their grab handle (Reanimated +
- * Gesture Handler); the up/remove buttons exist so reordering never depends on discovering
- * the drag gesture, per the approved design.
- */
-export default function DraggableQueueList({ items, onReorder, onPlay, onRemove }) {
-  const draggingIndex = useSharedValue(-1);
+/** Upcoming rows: body swipes scroll; only the three-bar handle can start reorder. */
+export default function DraggableQueueList({
+  items,
+  onReorder,
+  onPlay,
+  onRemove,
+}) {
+  const activeEntryId = useSharedValue(null);
+  const activeStartIndex = useSharedValue(-1);
   const dragY = useSharedValue(0);
-  const count = items.length;
+  const itemsRef = useRef(items);
+  const onReorderRef = useRef(onReorder);
+  itemsRef.current = items;
+  onReorderRef.current = onReorder;
 
+  const coordinatorRef = useRef(null);
+  if (!coordinatorRef.current) {
+    coordinatorRef.current = createQueueDragCoordinator({
+      getEntryIds: () => itemsRef.current.map((item) => item.id),
+      onCommit: (entryId, targetEntryId, placement) =>
+        onReorderRef.current(entryId, targetEntryId, placement),
+    });
+  }
+
+  const itemIds = items.map((item) => item.id);
+  const count = items.length;
   if (!count) return null;
 
   return (
@@ -31,61 +56,117 @@ export default function DraggableQueueList({ items, onReorder, onPlay, onRemove 
           item={item}
           index={index}
           count={count}
-          draggingIndex={draggingIndex}
+          itemIds={itemIds}
+          activeEntryId={activeEntryId}
+          activeStartIndex={activeStartIndex}
           dragY={dragY}
-          onReorder={onReorder}
-          onPlay={() => onPlay(item, index)}
-          onRemove={() => onRemove(item, index)}
-          onMoveUp={index > 0 ? () => onReorder(index, index - 1) : null}
+          onDragStart={(entryId, snapshot) =>
+            coordinatorRef.current.begin(entryId, snapshot)
+          }
+          onDragEnd={(targetIndex) =>
+            coordinatorRef.current.finish(targetIndex)
+          }
+          onDragCancel={() => coordinatorRef.current.cancel()}
+          onPlay={() => onPlay(item)}
+          onRemove={() => onRemove(item)}
         />
       ))}
     </View>
   );
 }
 
-function QueueRow({ item, index, count, draggingIndex, dragY, onReorder, onPlay, onRemove, onMoveUp }) {
-  const startIndex = useRef(index);
-  startIndex.current = index;
-
-  const commitReorder = (from, to) => {
-    if (to !== from) onReorder(from, to);
-  };
-
+function QueueRow({
+  item,
+  index,
+  count,
+  itemIds,
+  activeEntryId,
+  activeStartIndex,
+  dragY,
+  onDragStart,
+  onDragEnd,
+  onDragCancel,
+  onPlay,
+  onRemove,
+}) {
   const pan = Gesture.Pan()
+    .activeOffsetY([-7, 7])
+    .failOffsetX([-24, 24])
     .onStart(() => {
-      draggingIndex.value = startIndex.current;
+      activeEntryId.value = item.id;
+      activeStartIndex.value = index;
       dragY.value = 0;
+      runOnJS(onDragStart)(item.id, itemIds);
     })
-    .onUpdate((e) => {
-      dragY.value = e.translationY;
+    .onUpdate((event) => {
+      dragY.value = event.translationY;
     })
     .onEnd(() => {
-      const from = startIndex.current;
-      const target = Math.max(0, Math.min(count - 1, Math.round((from * SLOT + dragY.value) / SLOT)));
+      const target = Math.max(
+        0,
+        Math.min(
+          count - 1,
+          Math.round((activeStartIndex.value * SLOT + dragY.value) / SLOT),
+        ),
+      );
+      runOnJS(onDragEnd)(target);
+    })
+    .onFinalize((_event, success) => {
       dragY.value = withTiming(0, { duration: 160 });
-      draggingIndex.value = -1;
-      runOnJS(commitReorder)(from, target);
+      activeEntryId.value = null;
+      activeStartIndex.value = -1;
+      if (!success) runOnJS(onDragCancel)();
     });
 
-  const style = useAnimatedStyle(() => {
-    const active = draggingIndex.value;
-    if (active === -1) {
-      return { transform: [{ translateY: withTiming(0, { duration: 140 }) }], zIndex: 0, opacity: 1 };
+  const animatedStyle = useAnimatedStyle(() => {
+    const activeId = activeEntryId.value;
+    const active = activeStartIndex.value;
+    if (activeId === null || active < 0) {
+      return {
+        transform: [{ translateY: withTiming(0, { duration: 140 }) }],
+        zIndex: 0,
+        opacity: 1,
+      };
     }
-    if (active === index) {
-      return { transform: [{ translateY: dragY.value }], zIndex: 10, opacity: 0.92 };
+    if (activeId === item.id) {
+      return {
+        transform: [{ translateY: dragY.value }],
+        zIndex: 10,
+        opacity: 0.92,
+      };
     }
-    const target = Math.max(0, Math.min(count - 1, Math.round((active * SLOT + dragY.value) / SLOT)));
+    const target = Math.max(
+      0,
+      Math.min(
+        count - 1,
+        Math.round((active * SLOT + dragY.value) / SLOT),
+      ),
+    );
     let shift = 0;
     if (active < target && index > active && index <= target) shift = -SLOT;
     else if (active > target && index >= target && index < active) shift = SLOT;
-    return { transform: [{ translateY: withTiming(shift, { duration: 140 }) }], zIndex: 0, opacity: 1 };
+    return {
+      transform: [{ translateY: withTiming(shift, { duration: 140 }) }],
+      zIndex: 0,
+      opacity: 1,
+    };
   });
 
   return (
-    <Animated.View style={[styles.row, { top: index * SLOT, height: ROW_HEIGHT }, style]}>
+    <Animated.View
+      style={[
+        styles.row,
+        { top: index * SLOT, height: ROW_HEIGHT },
+        animatedStyle,
+      ]}
+    >
       <GestureDetector gesture={pan}>
-        <View style={styles.handle} hitSlop={8}>
+        <View
+          accessibilityLabel={`Reorder ${trackDisplayTitle(item.track)}`}
+          accessibilityRole="adjustable"
+          style={styles.handle}
+          hitSlop={8}
+        >
           <GrabHandle />
         </View>
       </GestureDetector>
@@ -102,13 +183,6 @@ function QueueRow({ item, index, count, draggingIndex, dragY, onReorder, onPlay,
         </View>
       </Pressable>
 
-      {onMoveUp ? (
-        <Pressable onPress={onMoveUp} style={styles.actionBtn} hitSlop={4}>
-          <UpChevron />
-        </Pressable>
-      ) : (
-        <View style={styles.actionBtn} />
-      )}
       <Pressable onPress={onRemove} style={styles.actionBtn} hitSlop={4}>
         <RemoveGlyph />
       </Pressable>
@@ -118,35 +192,36 @@ function QueueRow({ item, index, count, draggingIndex, dragY, onReorder, onPlay,
 
 const styles = StyleSheet.create({
   row: {
-    position: 'absolute',
+    position: "absolute",
     left: 0,
     right: 0,
-    flexDirection: 'row',
-    alignItems: 'center',
+    flexDirection: "row",
+    alignItems: "center",
     gap: 10,
     paddingHorizontal: 6,
     borderRadius: 15,
-    backgroundColor: 'transparent',
+    backgroundColor: "transparent",
   },
   handle: {
-    width: 26,
-    alignItems: 'center',
-    justifyContent: 'center',
+    width: 30,
+    height: 42,
+    alignItems: "center",
+    justifyContent: "center",
   },
   main: {
-    flexDirection: 'row',
-    alignItems: 'center',
+    flexDirection: "row",
+    alignItems: "center",
     gap: 11,
     flex: 1,
     minWidth: 0,
   },
   title: {
-    fontFamily: 'Manrope_600SemiBold',
+    fontFamily: "Manrope_600SemiBold",
     fontSize: 13,
     color: colors.text,
   },
   artist: {
-    fontFamily: 'Manrope_500Medium',
+    fontFamily: "Manrope_500Medium",
     fontSize: 11,
     color: colors.textMute,
     marginTop: 2.5,
@@ -155,8 +230,8 @@ const styles = StyleSheet.create({
     width: 30,
     height: 30,
     borderRadius: 10,
-    backgroundColor: 'rgba(255,255,255,0.05)',
-    alignItems: 'center',
-    justifyContent: 'center',
+    backgroundColor: "rgba(255,255,255,0.05)",
+    alignItems: "center",
+    justifyContent: "center",
   },
 });

@@ -1,6 +1,6 @@
 import React from 'react';
 import { View, Text } from 'react-native';
-import Svg, { Polygon } from 'react-native-svg';
+import Svg, { Polygon, Rect } from 'react-native-svg';
 
 /**
  * Auric's icon set: no icon font or external SVG assets. Glyphs use plain views, with
@@ -60,22 +60,6 @@ export function DownChevron({ size = 9, color = '#EDEDF2', stroke = 1.8 }) {
   );
 }
 
-export function UpChevron({ size = 7, color = '#9A9AB0', stroke = 1.6 }) {
-  return (
-    <View
-      style={{
-        width: size,
-        height: size,
-        borderLeftWidth: stroke,
-        borderTopWidth: stroke,
-        borderColor: color,
-        transform: [{ rotate: '45deg' }],
-        marginTop: 3,
-      }}
-    />
-  );
-}
-
 export function StatsGlyph({ color = '#C9C9D6' }) {
   return (
     <View style={{ flexDirection: 'row', alignItems: 'flex-end', gap: 2.5 }}>
@@ -126,41 +110,19 @@ export function PauseBars({ height = 13, width = 3, gap = 3, color = '#0B0B10' }
 
 export function PrevGlyph({ color = '#EDEDF2' }) {
   return (
-    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 2 }}>
-      <View style={{ width: 2.5, height: 16, backgroundColor: color, borderRadius: 2 }} />
-      <View
-        style={{
-          width: 0,
-          height: 0,
-          borderTopWidth: 9,
-          borderBottomWidth: 9,
-          borderRightWidth: 13,
-          borderTopColor: 'transparent',
-          borderBottomColor: 'transparent',
-          borderRightColor: color,
-        }}
-      />
-    </View>
+    <Svg width={22} height={18} viewBox="0 0 22 18">
+      <Rect x="1" y="1" width="2.5" height="16" rx="1.25" fill={color} />
+      <Polygon points="19,1 6,9 19,17" fill={color} />
+    </Svg>
   );
 }
 
 export function NextGlyph({ color = '#EDEDF2' }) {
   return (
-    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 2 }}>
-      <View
-        style={{
-          width: 0,
-          height: 0,
-          borderTopWidth: 9,
-          borderBottomWidth: 9,
-          borderLeftWidth: 13,
-          borderTopColor: 'transparent',
-          borderBottomColor: 'transparent',
-          borderLeftColor: color,
-        }}
-      />
-      <View style={{ width: 2.5, height: 16, backgroundColor: color, borderRadius: 2 }} />
-    </View>
+    <Svg width={22} height={18} viewBox="0 0 22 18">
+      <Polygon points="3,1 16,9 3,17" fill={color} />
+      <Rect x="18.5" y="1" width="2.5" height="16" rx="1.25" fill={color} />
+    </Svg>
   );
 }
 
