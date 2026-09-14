@@ -1,4 +1,3 @@
-import { registerBackgroundEventHandler } from "@rntp/player";
 import { audioEngine } from ".";
 import { useLibraryStore } from "../../stores/useLibraryStore";
 import { useQueueStore } from "../../stores/useQueueStore";
@@ -26,12 +25,7 @@ async function ensureBackgroundPlaybackState() {
   await backgroundHydration;
 }
 
-const BACKGROUND_HANDLER_KEY = "__auricRntpBackgroundHandlerRegistered";
-
-if (!globalThis[BACKGROUND_HANDLER_KEY]) {
-  registerBackgroundEventHandler(() => async (event) => {
-    await ensureBackgroundPlaybackState();
-    await audioEngine.handleNativeEvent?.(event);
-  });
-  globalThis[BACKGROUND_HANDLER_KEY] = true;
+export async function handleBackgroundPlaybackEvent(event) {
+  await ensureBackgroundPlaybackState();
+  await audioEngine.handleNativeEvent?.(event);
 }

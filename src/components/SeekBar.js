@@ -8,7 +8,14 @@ import { gradients } from "../constants/theme";
 const { physicalSeekRatio } = require("../features/player/playerUxPolicy.cjs");
 
 /** Tap- or drag-to-seek progress bar used by the Full Player. */
-export default function SeekBar({ pct, onSeek, height = 4, thumbSize = 12 }) {
+export default function SeekBar({
+  pct,
+  onSeek,
+  height = 4,
+  thumbSize = 12,
+  panGestureRef,
+  tapGestureRef,
+}) {
   const [width, setWidth] = useState(0);
   const [dragRatio, setDragRatio] = useState(null);
 
@@ -24,13 +31,16 @@ export default function SeekBar({ pct, onSeek, height = 4, thumbSize = 12 }) {
   const clearPreview = () => setDragRatio(null);
 
   const pan = Gesture.Pan()
+    .withRef(panGestureRef)
     .minDistance(4)
     .onUpdate((e) => runOnJS(previewAtX)(e.x))
     .onEnd((e) => runOnJS(commitAtX)(e.x))
     .onFinalize((_event, success) => {
       if (!success) runOnJS(clearPreview)();
     });
-  const tap = Gesture.Tap().onEnd((e) => runOnJS(commitAtX)(e.x));
+  const tap = Gesture.Tap()
+    .withRef(tapGestureRef)
+    .onEnd((e) => runOnJS(commitAtX)(e.x));
   const gesture = Gesture.Race(pan, tap);
   const rawDisplayPct = dragRatio === null ? pct : dragRatio * 100;
   const displayPct = Math.max(0, Math.min(100, rawDisplayPct || 0));

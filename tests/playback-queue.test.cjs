@@ -136,9 +136,15 @@ test("direct play commits queue replacement only after activation succeeds", asy
       return refill;
     },
   });
-  assert.equal(await directPlay, true);
+  let settled = false;
+  void directPlay.then(() => {
+    settled = true;
+  });
+  await Promise.resolve();
   assert.deepEqual(order, ["activate", "reset", "refill"]);
+  assert.equal(settled, false);
   resolveRefill(true);
+  assert.equal(await directPlay, true);
 
   const preserved = ["keep"];
   const failed = await startDirectPlayback({
@@ -369,6 +375,25 @@ test("concurrent refill triggers share one network request", async () => {
   assert.equal(fixture.state.smartCalls.length, 1);
 });
 
+test("background wait joins an existing refill without starting a request", async () => {
+  let resolveRequest;
+  const request = new Promise((resolve) => {
+    resolveRequest = resolve;
+  });
+  const fixture = coordinatorFixture({ smartResult: () => request });
+
+  assert.equal(await fixture.coordinator.waitForPending(), false);
+  assert.equal(fixture.state.smartCalls.length, 0);
+
+  const refill = fixture.coordinator.refill();
+  const backgroundWait = fixture.coordinator.waitForPending();
+  assert.equal(fixture.state.smartCalls.length, 1);
+  resolveRequest([playable("ready-before-background")]);
+  assert.equal(await backgroundWait, true);
+  assert.equal(await refill, true);
+  assert.equal(fixture.state.smartCalls.length, 1);
+});
+
 test("direct-play invalidation drops a stale refill and queues one fresh refill", async () => {
   let resolveStale;
   let requestNumber = 0;
@@ -385,7 +410,7 @@ test("direct-play invalidation drops a stale refill and queues one fresh refill"
   fixture.coordinator.invalidate({ refillAfterPending: true });
   resolveStale([playable("stale")]);
   assert.equal(await stale, false);
-  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(await fixture.coordinator.waitForPending(), true);
   assert.equal(fixture.state.smartCalls.length, 2);
   assert.deepEqual(fixture.state.entries.map((item) => item.trackId), ["fresh-direct"]);
 });

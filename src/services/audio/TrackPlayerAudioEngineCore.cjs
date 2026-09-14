@@ -165,12 +165,12 @@ class TrackPlayerAudioEngineCore {
     const nativeItems = projection.map((item) =>
       nativeItem(item, this.createSource),
     );
-    this.generation += 1;
-    const loadGeneration = this.generation;
-    if (this.readyWaiter) {
-      clearTimeout(this.readyWaiter.timeout);
-      this.readyWaiter.reject(new Error("STALE_ACTIVATION"));
-      this.readyWaiter = null;
+    const reservedGeneration = options.activationGeneration;
+    const loadGeneration = Number.isInteger(reservedGeneration)
+      ? reservedGeneration
+      : this._beginGeneration();
+    if (loadGeneration !== this.generation) {
+      throw new Error("STALE_ACTIVATION");
     }
     this.projection = projection;
     this.nativeItems = nativeItems;
@@ -203,8 +203,37 @@ class TrackPlayerAudioEngineCore {
     return loadGeneration;
   }
 
-  play() {
+  beginActivation() {
     this.initialize();
+    const generation = this._beginGeneration();
+    if (this.itemId) {
+      this.player.pause();
+      this.status.isPlaying = false;
+    }
+    return generation;
+  }
+
+  cancelActivation() {
+    const generation = this._beginGeneration();
+    if (this.initialized && this.itemId) {
+      this.player.pause();
+      this.status.isPlaying = false;
+    }
+    return generation;
+  }
+
+  isGenerationCurrent(generation) {
+    return generation === this.generation;
+  }
+
+  play(generation) {
+    this.initialize();
+    if (
+      Number.isInteger(generation) &&
+      !this.isGenerationCurrent(generation)
+    ) {
+      throw new Error("STALE_ACTIVATION");
+    }
     if (!this.itemId) throw new Error("NO_AUDIO_LOADED");
     if (this.diagnostics && this.diagnostics.playRequestedAtMs === null) {
       this.diagnostics.playRequestedAtMs = this.now();
@@ -436,6 +465,21 @@ class TrackPlayerAudioEngineCore {
     this.onTrackChanged = null;
     this.onRemoteNext = null;
     this.onRemotePrevious = null;
+  }
+
+  _beginGeneration() {
+    this.generation += 1;
+    if (this.pendingTransition) {
+      clearTimeout(this.pendingTransition.timeout);
+      this.pendingTransition.reject(new Error("STALE_ACTIVATION"));
+      this.pendingTransition = null;
+    }
+    if (this.readyWaiter) {
+      clearTimeout(this.readyWaiter.timeout);
+      this.readyWaiter.reject(new Error("STALE_ACTIVATION"));
+      this.readyWaiter = null;
+    }
+    return this.generation;
   }
 
   _subscribe() {

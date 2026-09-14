@@ -55,14 +55,12 @@ function commitAfterActivation({ activate, commit }) {
   });
 }
 
-function startDirectPlayback({ resetQueue, activate, refill }) {
-  return commitAfterActivation({
-    activate,
-    commit: () => {
-      resetQueue();
-      Promise.resolve(refill()).catch(() => {});
-    },
-  });
+async function startDirectPlayback({ resetQueue, activate, refill }) {
+  const activated = await activate();
+  if (activated === false) return false;
+  resetQueue();
+  await Promise.resolve(refill()).catch(() => false);
+  return activated;
 }
 
 async function takeNextWithEmergency({ takeNext, emergencyRefill }) {
@@ -90,6 +88,7 @@ function createQueueRefillCoordinator({
   failureCooldownMs = DEFAULT_FAILURE_COOLDOWN_MS,
 }) {
   let inFlight = null;
+  let queuedRerun = null;
   let generation = 0;
   let rerunRequested = false;
   let lastFailureAt = -Infinity;
@@ -156,7 +155,13 @@ function createQueueRefillCoordinator({
         inFlight = null;
         if (rerunRequested) {
           rerunRequested = false;
-          Promise.resolve().then(() => performRefill()).catch(() => {});
+          const rerun = Promise.resolve()
+            .then(() => performRefill())
+            .catch(() => false)
+            .finally(() => {
+              if (queuedRerun === rerun) queuedRerun = null;
+            });
+          queuedRerun = rerun;
         }
       }
     })();
@@ -172,6 +177,14 @@ function createQueueRefillCoordinator({
     },
     isPending() {
       return Boolean(inFlight);
+    },
+    async waitForPending() {
+      let waited = false;
+      while (inFlight || queuedRerun) {
+        waited = true;
+        await (inFlight || queuedRerun);
+      }
+      return waited;
     },
     constants: {
       target,

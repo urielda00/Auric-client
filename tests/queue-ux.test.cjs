@@ -1,4 +1,6 @@
 const assert = require("node:assert/strict");
+const { readFileSync } = require("node:fs");
+const { join } = require("node:path");
 const test = require("node:test");
 
 const {
@@ -140,6 +142,101 @@ test("a deliberate upward player gesture opens the existing queue route", () => 
   );
 });
 
+test("accepted Queue swipe navigates synchronously without a data prerequisite", () => {
+  const events = [];
+  const unresolvedPlaybackWork = new Promise(() => {});
+  const onRelease = createQueueSwipeReleaseHandler(() =>
+    events.push("navigate"),
+  );
+
+  assert.equal(onRelease(2, -28, -100), true);
+  events.push("after-release");
+  assert.deepEqual(events, ["navigate", "after-release"]);
+  assert.ok(unresolvedPlaybackWork instanceof Promise);
+
+  const source = readFileSync(
+    join(process.cwd(), "src/features/player/FullPlayerScreen.js"),
+    "utf8",
+  );
+  assert.match(
+    source,
+    /useCallback\(\(\) => router\.push\("\/queue"\), \[router\]\)/,
+  );
+});
+
+test("Full Player artwork and general background share the broad Queue swipe surface", () => {
+  const routes = [];
+  const releaseFromArtwork = createQueueSwipeReleaseHandler(() =>
+    routes.push("artwork"),
+  );
+  const releaseFromBackground = createQueueSwipeReleaseHandler(() =>
+    routes.push("background"),
+  );
+
+  assert.equal(releaseFromArtwork(3, -40, -200), true);
+  assert.equal(releaseFromBackground(0, -28, -100), true);
+  assert.deepEqual(routes, ["artwork", "background"]);
+
+  const source = readFileSync(
+    join(process.cwd(), "src/features/player/FullPlayerScreen.js"),
+    "utf8",
+  );
+  assert.match(
+    source,
+    /return \(\s*<GestureDetector gesture=\{queueSwipe\}>\s*<View style=\{styles\.screen\}>/,
+  );
+  assert.equal(source.match(/gesture=\{queueSwipe\}/g)?.length, 1);
+  assert.ok(source.indexOf("styles.artZone") > source.indexOf("styles.screen"));
+  assert.ok(source.indexOf("styles.titleRow") > source.indexOf("styles.artZone"));
+  assert.ok(
+    source.indexOf("styles.queuePullZone") > source.indexOf("styles.titleRow"),
+  );
+});
+
+test("Full Player controls have gesture priority over the broad Queue swipe", () => {
+  const source = readFileSync(
+    join(process.cwd(), "src/features/player/FullPlayerScreen.js"),
+    "utf8",
+  );
+  const seekSource = readFileSync(
+    join(process.cwd(), "src/components/SeekBar.js"),
+    "utf8",
+  );
+
+  assert.match(
+    source,
+    /\.requireExternalGestureToFail\(\s*seekPanGestureRef,\s*seekTapGestureRef,/,
+  );
+  assert.match(source, /panGestureRef=\{seekPanGestureRef\}/);
+  assert.match(source, /tapGestureRef=\{seekTapGestureRef\}/);
+  assert.match(seekSource, /Gesture\.Pan\(\)\s*\.withRef\(panGestureRef\)/);
+  assert.match(seekSource, /Gesture\.Tap\(\)\s*\.withRef\(tapGestureRef\)/);
+  assert.doesNotMatch(
+    seekSource,
+    /Gesture\.Race\([^)]*\)[\s\S]{0,80}\.withRef/,
+  );
+
+  for (const control of [
+    "back",
+    "queueButton",
+    "like",
+    "retry",
+    "previous",
+    "toggle",
+    "next",
+  ]) {
+    assert.match(
+      source,
+      new RegExp(`GestureDetector gesture=\\{controlGestures\\.${control}\\}`),
+    );
+  }
+
+  const routes = [];
+  const release = createQueueSwipeReleaseHandler(() => routes.push("queue"));
+  assert.equal(release(0, 0, 0), false);
+  assert.deepEqual(routes, []);
+});
+
 test("tap, small movement, downward movement, and horizontal gestures do not open queue", () => {
   const routes = [];
   const onRelease = createQueueSwipeReleaseHandler(() => routes.push("/queue"));
@@ -197,24 +294,50 @@ test("short upward distance or flick opens Queue while tiny/horizontal input doe
   assert.equal(shouldOpenQueueFromSwipe({ translationY: 28 }), false);
 });
 
-test("Queue handle dismisses on a short downward swipe or flick only", () => {
+test("Queue dismiss accepts a natural downward drag and a short fast flick", () => {
   const calls = [];
   const release = createQueueDismissReleaseHandler(() => calls.push("player"));
-  assert.equal(release(2, 28, 100), true);
+  assert.equal(release(2, 22, 100), true);
   assert.equal(
-    shouldDismissQueueFromSwipe({ translationY: 12, velocityY: 500 }),
+    shouldDismissQueueFromSwipe({ translationY: 11, velocityY: 425 }),
     true,
   );
-  assert.equal(shouldDismissQueueFromSwipe({ translationY: 7 }), false);
-  assert.equal(
-    shouldDismissQueueFromSwipe({ translationX: 30, translationY: 28 }),
-    false,
-  );
-  assert.equal(shouldDismissQueueFromSwipe({ translationY: -28 }), false);
   assert.deepEqual(calls, ["player"]);
 });
 
-test("explicit successful playback emits one monotonic Full Player intent", () => {
+test("Queue dismiss rejects tiny, horizontal, and upward movement", () => {
+  assert.equal(shouldDismissQueueFromSwipe({ translationY: 6 }), false);
+  assert.equal(
+    shouldDismissQueueFromSwipe({ translationX: 38, translationY: 22 }),
+    false,
+  );
+  assert.equal(shouldDismissQueueFromSwipe({ translationY: -22 }), false);
+});
+
+test("Queue top chrome owns dismissal while its virtualized timeline stays independent", () => {
+  const source = readFileSync(
+    join(process.cwd(), "src/features/queue/QueueScreen.js"),
+    "utf8",
+  );
+  const detector = source.indexOf(
+    '<GestureDetector gesture={queueDismissSwipe}>',
+  );
+  const topChrome = source.indexOf(
+    '<View style={styles.topChrome}>',
+    detector,
+  );
+  const header = source.indexOf('<View style={styles.headerRow}>', topChrome);
+  const detectorEnd = source.indexOf("</GestureDetector>", topChrome);
+  const timeline = source.indexOf('<FlatList', detectorEnd);
+
+  assert.ok(detector >= 0);
+  assert.ok(topChrome > detector);
+  assert.ok(header > topChrome && header < detectorEnd);
+  assert.ok(timeline > detectorEnd);
+  assert.match(source, /topChrome:\s*\{\s*minHeight: 76/);
+});
+
+test("accepted explicit selection emits a Full Player intent immediately", () => {
   const coordinator = createPlayerNavigationIntentCoordinator();
   const intents = [];
   coordinator.subscribe((intent) => intents.push(intent));
@@ -234,6 +357,23 @@ test("explicit successful playback emits one monotonic Full Player intent", () =
   assert.equal(intents.length, 1);
 });
 
+test("Full Player navigation does not wait for native Ready", () => {
+  const coordinator = createPlayerNavigationIntentCoordinator();
+  const events = [];
+  coordinator.subscribe(() => events.push("navigate"));
+  let resolveReady;
+  const ready = new Promise((resolve) => {
+    resolveReady = resolve;
+  });
+
+  notifyExplicitPlaybackSelection(true, () => coordinator.request());
+  events.push("loading");
+
+  assert.deepEqual(events, ["navigate", "loading"]);
+  resolveReady();
+  return ready;
+});
+
 test("non-user playback transitions produce no navigation and rapid selections do not duplicate pushes", () => {
   const coordinator = createPlayerNavigationIntentCoordinator();
   const routes = [];
@@ -250,6 +390,21 @@ test("non-user playback transitions produce no navigation and rapid selections d
 
   consumer.syncRoute("/player");
   coordinator.request();
+  assert.deepEqual(routes, ["/player"]);
+});
+
+test("rapid A, B, C selections produce one effective player route opening", () => {
+  const coordinator = createPlayerNavigationIntentCoordinator();
+  const routes = [];
+  const consumer = createPlayerNavigationIntentConsumer({
+    navigate: () => routes.push("/player"),
+  });
+  coordinator.subscribe((intent) => consumer.consume(intent));
+
+  notifyExplicitPlaybackSelection(true, () => coordinator.request());
+  notifyExplicitPlaybackSelection(true, () => coordinator.request());
+  notifyExplicitPlaybackSelection(true, () => coordinator.request());
+
   assert.deepEqual(routes, ["/player"]);
 });
 

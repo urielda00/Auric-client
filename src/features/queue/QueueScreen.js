@@ -1,10 +1,19 @@
-import React, { useCallback, useMemo, useRef } from "react";
-import { View, Text, Pressable, StyleSheet } from "react-native";
+import React, {
+  memo,
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
 import {
-  Gesture,
-  GestureDetector,
-  ScrollView,
-} from "react-native-gesture-handler";
+  FlatList,
+  InteractionManager,
+  View,
+  Text,
+  Pressable,
+  StyleSheet,
+} from "react-native";
+import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import { runOnJS } from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
@@ -27,7 +36,6 @@ const {
   PLAYED_ROW_HEIGHT,
   createQueuePlaybackControls,
   deriveQueueTimeline,
-  getQueueInitialOffset,
 } = require("./queueTimeline.cjs");
 const {
   createQueueDismissReleaseHandler,
@@ -47,6 +55,7 @@ export default function QueueScreen() {
   const moveEntry = useQueueStore((s) => s.moveEntry);
   const removeEntry = useQueueStore((s) => s.removeEntry);
   const tracksById = useLibraryStore((s) => s.tracksById);
+  const [timelineReady, setTimelineReady] = useState(false);
 
   const timeline = useMemo(
     () =>
@@ -68,18 +77,14 @@ export default function QueueScreen() {
     ],
   );
   const controls = useMemo(() => createQueuePlaybackControls(toggle), [toggle]);
-  const initialOffset = useRef({
-    x: 0,
-    y: getQueueInitialOffset(timeline.played.length),
-  });
   const dismissQueue = useCallback(() => router.back(), [router]);
   const releaseQueueDismiss = useMemo(
     () => createQueueDismissReleaseHandler(dismissQueue),
     [dismissQueue],
   );
   const queueDismissSwipe = Gesture.Pan()
-    .activeOffsetY([-7, 7])
-    .failOffsetX([-32, 32])
+    .activeOffsetY([-6, 6])
+    .failOffsetX([-40, 40])
     .onEnd((event) => {
       runOnJS(releaseQueueDismiss)(
         event.translationX,
@@ -88,14 +93,54 @@ export default function QueueScreen() {
       );
     });
 
-  const handlePlay = (item) => {
-    playQueued(item.trackId, item.context || playbackContext, item.id);
+  useEffect(() => {
+    // Keep SVG artwork and per-row gestures off the route transition's critical
+    // path so the sheet chrome can commit and respond immediately.
+    const task = InteractionManager.runAfterInteractions(() => {
+      setTimelineReady(true);
+    });
+    return () => task.cancel();
+  }, []);
+
+  const handlePlay = useCallback(
+    (item) => {
+      playQueued(item.trackId, item.context || playbackContext, item.id);
+    },
+    [playQueued, playbackContext],
+  );
+
+  const handleReorder = useCallback(
+    (entryId, targetEntryId, placement) =>
+      moveEntry(entryId, targetEntryId, placement),
+    [moveEntry],
+  );
+
+  const handleRemove = useCallback(
+    (item) => removeEntry(item.id),
+    [removeEntry],
+  );
+
+  const timelineRows = useMemo(
+    () => [
+      ...timeline.played.map((item) => ({ kind: "played", item })),
+      { kind: "active", id: "active-queue" },
+    ],
+    [timeline.played],
+  );
+
+  const renderTimelineRow = ({ item: row }) => {
+    if (row.kind === "played") return <PlayedRow item={row.item} />;
+    return (
+      <ActiveQueue
+        current={timeline.current}
+        upcoming={timeline.upcoming}
+        isPlaying={isPlaying}
+        onReorder={handleReorder}
+        onPlay={handlePlay}
+        onRemove={handleRemove}
+      />
+    );
   };
-
-  const handleReorder = (entryId, targetEntryId, placement) =>
-    moveEntry(entryId, targetEntryId, placement);
-
-  const handleRemove = (item) => removeEntry(item.id);
 
   return (
     <View style={styles.scrim}>
@@ -106,16 +151,18 @@ export default function QueueScreen() {
       />
       <View style={styles.sheet}>
         <GestureDetector gesture={queueDismissSwipe}>
-          <View style={styles.grabberWrap}>
-          <View style={styles.grabber} />
+          <View style={styles.topChrome}>
+            <View style={styles.grabberWrap}>
+              <View style={styles.grabber} />
+            </View>
+            <View style={styles.headerRow}>
+              <Text style={styles.headerTitle}>Queue</Text>
+              <Pressable onPress={dismissQueue} hitSlop={8}>
+                <Text style={styles.playerBtn}>PLAYER</Text>
+              </Pressable>
+            </View>
           </View>
         </GestureDetector>
-        <View style={styles.headerRow}>
-          <Text style={styles.headerTitle}>Queue</Text>
-          <Pressable onPress={() => router.back()} hitSlop={8}>
-            <Text style={styles.playerBtn}>PLAYER</Text>
-          </Pressable>
-        </View>
 
         {timeline.current ? (
           <View style={styles.playbackHeader}>
@@ -143,72 +190,40 @@ export default function QueueScreen() {
           </View>
         ) : null}
 
-        <ScrollView
-          style={styles.timeline}
-          contentOffset={initialOffset.current}
-          nestedScrollEnabled
-          contentContainerStyle={[
-            styles.listContent,
-            { paddingBottom: 24 + insets.bottom },
-          ]}
-          showsVerticalScrollIndicator={false}
-        >
-          {timeline.played.map((item) => (
-            <PlayedRow key={item.id} item={item} />
-          ))}
-
-          {timeline.current ? (
-            <View style={styles.nowPlayingWrap}>
-              <LinearGradient
-                colors={["rgba(167,140,240,0.16)", "rgba(90,209,224,0.08)"]}
-                start={{ x: 0, y: 0 }}
-                end={{ x: 1, y: 1 }}
-                style={styles.nowPlayingCard}
-              >
-                <TrackArt track={timeline.current.track} size={46} radius={14} />
-                <View style={{ flex: 1, minWidth: 0 }}>
-                  <Text style={styles.nowTitle} numberOfLines={1}>
-                    {trackDisplayTitle(timeline.current.track)}
-                  </Text>
-                  <Text style={styles.nowEyebrow}>Now playing</Text>
-                </View>
-                <EqualizerBars
-                  bars={3}
-                  height={16}
-                  width={2.5}
-                  gap={3}
-                  color={colors.violetLight}
-                  active={isPlaying}
-                />
-              </LinearGradient>
-            </View>
-          ) : null}
-
-          {timeline.upcoming.length ? (
-            <Eyebrow style={styles.nextUpLabel}>
-              Next up · drag to reorder
-            </Eyebrow>
-          ) : null}
-
-          {timeline.upcoming.length ? (
-            <DraggableQueueList
-              items={timeline.upcoming}
-              onReorder={handleReorder}
-              onPlay={handlePlay}
-              onRemove={handleRemove}
-            />
-          ) : (
-            <Text style={styles.emptyText}>
-              {'Nothing queued. Add tracks with "Play Next" or start a shuffle.'}
-            </Text>
-          )}
-        </ScrollView>
+        {timelineReady ? (
+          <FlatList
+            testID="queue-timeline"
+            style={styles.timeline}
+            data={timelineRows}
+            renderItem={renderTimelineRow}
+            keyExtractor={(row) =>
+              row.kind === "played" ? `played-${row.item.id}` : row.id
+            }
+            initialScrollIndex={timeline.played.length}
+            getItemLayout={(_data, index) => ({
+              length: PLAYED_ROW_HEIGHT,
+              offset: index * PLAYED_ROW_HEIGHT,
+              index,
+            })}
+            initialNumToRender={6}
+            maxToRenderPerBatch={6}
+            windowSize={5}
+            nestedScrollEnabled
+            contentContainerStyle={[
+              styles.listContent,
+              { paddingBottom: 24 + insets.bottom },
+            ]}
+            showsVerticalScrollIndicator={false}
+          />
+        ) : (
+          <View testID="queue-timeline-placeholder" style={styles.timeline} />
+        )}
       </View>
     </View>
   );
 }
 
-function PlayedRow({ item }) {
+const PlayedRow = memo(function PlayedRow({ item }) {
   return (
     <View pointerEvents="none" style={styles.playedRow}>
       <TrackArt track={item.track} size={40} radius={12} />
@@ -223,7 +238,66 @@ function PlayedRow({ item }) {
       <Text style={styles.playedLabel}>PLAYED</Text>
     </View>
   );
-}
+});
+
+const ActiveQueue = memo(function ActiveQueue({
+  current,
+  upcoming,
+  isPlaying,
+  onReorder,
+  onPlay,
+  onRemove,
+}) {
+  return (
+    <>
+      {current ? (
+        <View style={styles.nowPlayingWrap}>
+          <LinearGradient
+            colors={["rgba(167,140,240,0.16)", "rgba(90,209,224,0.08)"]}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 1 }}
+            style={styles.nowPlayingCard}
+          >
+            <TrackArt track={current.track} size={46} radius={14} />
+            <View style={{ flex: 1, minWidth: 0 }}>
+              <Text style={styles.nowTitle} numberOfLines={1}>
+                {trackDisplayTitle(current.track)}
+              </Text>
+              <Text style={styles.nowEyebrow}>Now playing</Text>
+            </View>
+            <EqualizerBars
+              bars={3}
+              height={16}
+              width={2.5}
+              gap={3}
+              color={colors.violetLight}
+              active={isPlaying}
+            />
+          </LinearGradient>
+        </View>
+      ) : null}
+
+      {upcoming.length ? (
+        <Eyebrow style={styles.nextUpLabel}>
+          Next up · drag to reorder
+        </Eyebrow>
+      ) : null}
+
+      {upcoming.length ? (
+        <DraggableQueueList
+          items={upcoming}
+          onReorder={onReorder}
+          onPlay={onPlay}
+          onRemove={onRemove}
+        />
+      ) : (
+        <Text style={styles.emptyText}>
+          {'Nothing queued. Add tracks with "Play Next" or start a shuffle.'}
+        </Text>
+      )}
+    </>
+  );
+});
 
 const styles = StyleSheet.create({
   scrim: {
@@ -242,6 +316,9 @@ const styles = StyleSheet.create({
     borderTopWidth: 1,
     borderColor: "rgba(255,255,255,0.1)",
     overflow: "hidden",
+  },
+  topChrome: {
+    minHeight: 76,
   },
   grabberWrap: {
     height: 32,

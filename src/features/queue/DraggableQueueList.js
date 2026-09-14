@@ -1,4 +1,4 @@
-import React, { useRef } from "react";
+import React, { memo, useCallback, useMemo, useRef } from "react";
 import { View, Text, Pressable, StyleSheet } from "react-native";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import Animated, {
@@ -21,7 +21,7 @@ const ROW_GAP = 2;
 const SLOT = ROW_HEIGHT + ROW_GAP;
 
 /** Upcoming rows: body swipes scroll; only the three-bar handle can start reorder. */
-export default function DraggableQueueList({
+function DraggableQueueList({
   items,
   onReorder,
   onPlay,
@@ -44,8 +44,20 @@ export default function DraggableQueueList({
     });
   }
 
-  const itemIds = items.map((item) => item.id);
+  const itemIds = useMemo(() => items.map((item) => item.id), [items]);
   const count = items.length;
+  const handleDragStart = useCallback(
+    (entryId, snapshot) => coordinatorRef.current.begin(entryId, snapshot),
+    [],
+  );
+  const handleDragEnd = useCallback(
+    (targetIndex) => coordinatorRef.current.finish(targetIndex),
+    [],
+  );
+  const handleDragCancel = useCallback(
+    () => coordinatorRef.current.cancel(),
+    [],
+  );
   if (!count) return null;
 
   return (
@@ -60,22 +72,18 @@ export default function DraggableQueueList({
           activeEntryId={activeEntryId}
           activeStartIndex={activeStartIndex}
           dragY={dragY}
-          onDragStart={(entryId, snapshot) =>
-            coordinatorRef.current.begin(entryId, snapshot)
-          }
-          onDragEnd={(targetIndex) =>
-            coordinatorRef.current.finish(targetIndex)
-          }
-          onDragCancel={() => coordinatorRef.current.cancel()}
-          onPlay={() => onPlay(item)}
-          onRemove={() => onRemove(item)}
+          onDragStart={handleDragStart}
+          onDragEnd={handleDragEnd}
+          onDragCancel={handleDragCancel}
+          onPlay={onPlay}
+          onRemove={onRemove}
         />
       ))}
     </View>
   );
 }
 
-function QueueRow({
+const QueueRow = memo(function QueueRow({
   item,
   index,
   count,
@@ -171,7 +179,7 @@ function QueueRow({
         </View>
       </GestureDetector>
 
-      <Pressable onPress={onPlay} style={styles.main}>
+      <Pressable onPress={() => onPlay(item)} style={styles.main}>
         <TrackArt track={item.track} size={42} radius={13} />
         <View style={{ flex: 1, minWidth: 0 }}>
           <Text style={styles.title} numberOfLines={1}>
@@ -183,12 +191,18 @@ function QueueRow({
         </View>
       </Pressable>
 
-      <Pressable onPress={onRemove} style={styles.actionBtn} hitSlop={4}>
+      <Pressable
+        onPress={() => onRemove(item)}
+        style={styles.actionBtn}
+        hitSlop={4}
+      >
         <RemoveGlyph />
       </Pressable>
     </Animated.View>
   );
-}
+});
+
+export default memo(DraggableQueueList);
 
 const styles = StyleSheet.create({
   row: {

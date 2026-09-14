@@ -20,11 +20,18 @@ export class MockAudioEngine extends AudioEngine {
     this.onRemotePrevious = null;
     this.projection = [];
     this.timer = null;
+    this.generation = 0;
   }
 
   load(track, options = {}) {
     if (!track || track.hasMedia !== true)
       throw new Error("TRACK_HAS_NO_MEDIA");
+    const generation = Number.isInteger(options.activationGeneration)
+      ? options.activationGeneration
+      : this._beginGeneration();
+    if (!this.isGenerationCurrent(generation)) {
+      throw new Error("STALE_ACTIVATION");
+    }
     this._stopTimer();
     this.positionMs = 0;
     this.durationMs = track?.durationMs || 0;
@@ -40,9 +47,32 @@ export class MockAudioEngine extends AudioEngine {
       ...(options.upcoming || []).slice(0, 3),
     ];
     this._emitStatus();
+    return generation;
   }
 
-  play() {
+  beginActivation() {
+    const generation = this._beginGeneration();
+    this.pause();
+    return generation;
+  }
+
+  cancelActivation() {
+    const generation = this._beginGeneration();
+    this.pause();
+    return generation;
+  }
+
+  isGenerationCurrent(generation) {
+    return generation === this.generation;
+  }
+
+  play(generation) {
+    if (
+      Number.isInteger(generation) &&
+      !this.isGenerationCurrent(generation)
+    ) {
+      throw new Error("STALE_ACTIVATION");
+    }
     if (this.isPlaying || this.durationMs <= 0) return;
     this.isPlaying = true;
     this._startTimer();
@@ -81,7 +111,7 @@ export class MockAudioEngine extends AudioEngine {
       previousTrackId,
       previousItemId,
       reason,
-      generation: 0,
+      generation: this.generation,
     });
     this._emitStatus();
     return Promise.resolve(true);
@@ -123,7 +153,7 @@ export class MockAudioEngine extends AudioEngine {
       error: null,
       trackId: this.trackId,
       itemId: this.itemId,
-      generation: 0,
+      generation: this.generation,
     };
   }
 
@@ -134,6 +164,11 @@ export class MockAudioEngine extends AudioEngine {
     this.onTrackChanged = null;
     this.onRemoteNext = null;
     this.onRemotePrevious = null;
+  }
+
+  _beginGeneration() {
+    this.generation += 1;
+    return this.generation;
   }
 
   _startTimer() {
@@ -162,13 +197,16 @@ export class MockAudioEngine extends AudioEngine {
             previousTrackId,
             previousItemId,
             reason: "completed",
-            generation: 0,
+            generation: this.generation,
           });
           this._startTimer();
           this._emitStatus();
           return;
         }
-        this.onEnded?.({ trackId: this.trackId, generation: 0 });
+        this.onEnded?.({
+          trackId: this.trackId,
+          generation: this.generation,
+        });
         return;
       }
       this._emitStatus();

@@ -1,23 +1,34 @@
-const DISTANCE_THRESHOLD = 28;
-const VELOCITY_THRESHOLD = 500;
-const MIN_VELOCITY_DISTANCE = 12;
-const MAX_HORIZONTAL_TRAVEL = 32;
-const VERTICAL_DOMINANCE = 1.12;
+const OPEN_QUEUE_THRESHOLDS = {
+  distance: 28,
+  velocity: 500,
+  minimumFlickDistance: 12,
+  horizontalTravel: 32,
+  verticalDominance: 1.12,
+};
+const DISMISS_QUEUE_THRESHOLDS = {
+  distance: 22,
+  velocity: 425,
+  minimumFlickDistance: 11,
+  horizontalTravel: 40,
+  verticalDominance: 1.08,
+};
 
 function isIntentionalVerticalSwipe({
   translationX,
   directedDistance,
   directedVelocity,
+  thresholds,
 }) {
   const horizontal = Math.abs(translationX);
-  const isClearlyVertical = directedDistance > horizontal * VERTICAL_DOMINANCE;
+  const isClearlyVertical =
+    directedDistance > horizontal * thresholds.verticalDominance;
   const hasIntent =
-    directedDistance >= DISTANCE_THRESHOLD ||
-    (directedDistance >= MIN_VELOCITY_DISTANCE &&
-      directedVelocity >= VELOCITY_THRESHOLD);
+    directedDistance >= thresholds.distance ||
+    (directedDistance >= thresholds.minimumFlickDistance &&
+      directedVelocity >= thresholds.velocity);
 
   return (
-    horizontal <= MAX_HORIZONTAL_TRAVEL &&
+    horizontal <= thresholds.horizontalTravel &&
     directedDistance > 0 &&
     isClearlyVertical &&
     hasIntent
@@ -33,6 +44,7 @@ function shouldOpenQueueFromSwipe({
     translationX,
     directedDistance: -translationY,
     directedVelocity: -velocityY,
+    thresholds: OPEN_QUEUE_THRESHOLDS,
   });
 }
 
@@ -45,6 +57,7 @@ function shouldDismissQueueFromSwipe({
     translationX,
     directedDistance: translationY,
     directedVelocity: velocityY,
+    thresholds: DISMISS_QUEUE_THRESHOLDS,
   });
 }
 

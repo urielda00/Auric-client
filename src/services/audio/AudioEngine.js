@@ -5,6 +5,7 @@
  * the same contract with a small native playback queue for server-backed playback.
  *
  * Every engine must implement:
+ *   beginActivation()       -> reserve/cancel previous activation generation
  *   load(track, options)     -> prepare current + bounded successors, stays paused
  *   play()                   -> resume/start playback
  *   pause()                  -> pause playback
@@ -20,6 +21,13 @@
  */
 
 export class AudioEngine {
+  beginActivation() {
+    throw new Error("AudioEngine.beginActivation not implemented");
+  }
+  cancelActivation() {}
+  isGenerationCurrent(/* generation */) {
+    return true;
+  }
   load(/* track */) {
     throw new Error("AudioEngine.load not implemented");
   }

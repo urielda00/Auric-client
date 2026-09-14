@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo } from "react";
+import React, { useCallback, useEffect, useMemo, useRef } from "react";
 import { View, Text, Pressable, StyleSheet, Dimensions } from "react-native";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import { runOnJS } from "react-native-reanimated";
@@ -63,11 +63,36 @@ export default function FullPlayerScreen() {
     () => createQueueSwipeReleaseHandler(openQueue),
     [openQueue],
   );
+  const seekPanGestureRef = useRef();
+  const seekTapGestureRef = useRef();
+  const controlGestures = useMemo(
+    () => ({
+      back: Gesture.Native().disallowInterruption(true),
+      queueButton: Gesture.Native().disallowInterruption(true),
+      like: Gesture.Native().disallowInterruption(true),
+      retry: Gesture.Native().disallowInterruption(true),
+      previous: Gesture.Native().disallowInterruption(true),
+      toggle: Gesture.Native().disallowInterruption(true),
+      next: Gesture.Native().disallowInterruption(true),
+    }),
+    [],
+  );
   const transportActions = useMemo(
     () => bindPhysicalTransportActions({ previous, next }),
     [next, previous],
   );
   const queueSwipe = Gesture.Pan()
+    .requireExternalGestureToFail(
+      seekPanGestureRef,
+      seekTapGestureRef,
+      controlGestures.back,
+      controlGestures.queueButton,
+      controlGestures.like,
+      controlGestures.retry,
+      controlGestures.previous,
+      controlGestures.toggle,
+      controlGestures.next,
+    )
     .activeOffsetY([-7, 7])
     .failOffsetX([-32, 32])
     .onEnd((event) => {
@@ -96,7 +121,8 @@ export default function FullPlayerScreen() {
     durationMs > 0 ? Math.min(100, (positionMs / durationMs) * 100) : 0;
 
   return (
-    <View style={styles.screen}>
+    <GestureDetector gesture={queueSwipe}>
+      <View style={styles.screen}>
       {ambient ? (
         <View
           pointerEvents="none"
@@ -105,27 +131,31 @@ export default function FullPlayerScreen() {
       ) : null}
 
       <View style={[styles.topBar, { paddingTop: Math.max(16, insets.top) }]}>
-        <IconButton
-          size={38}
-          radius={13}
-          background={colors.surface3}
-          border="transparent"
-          onPress={() => router.back()}
-        >
-          <DownChevron />
-        </IconButton>
+        <GestureDetector gesture={controlGestures.back}>
+          <IconButton
+            size={38}
+            radius={13}
+            background={colors.surface3}
+            border="transparent"
+            onPress={() => router.back()}
+          >
+            <DownChevron />
+          </IconButton>
+        </GestureDetector>
         <Text style={styles.sourceLabel}>
           {playbackContext?.label?.toUpperCase() || ""}
         </Text>
-        <IconButton
-          size={38}
-          radius={13}
-          background={colors.surface3}
-          border="transparent"
-          onPress={openQueue}
-        >
-          <QueueGlyph />
-        </IconButton>
+        <GestureDetector gesture={controlGestures.queueButton}>
+          <IconButton
+            size={38}
+            radius={13}
+            background={colors.surface3}
+            border="transparent"
+            onPress={openQueue}
+          >
+            <QueueGlyph />
+          </IconButton>
+        </GestureDetector>
       </View>
 
       <View style={styles.artZone}>
@@ -143,7 +173,8 @@ export default function FullPlayerScreen() {
             {joinArtists(track.artists)}
           </Text>
         </View>
-        <Pressable
+        <GestureDetector gesture={controlGestures.like}>
+          <Pressable
           onPress={() => toggleLike(track.id)}
           style={[
             styles.likeBtn,
@@ -161,12 +192,15 @@ export default function FullPlayerScreen() {
           >
             {isLiked ? "♥" : "♡"}
           </Text>
-        </Pressable>
+          </Pressable>
+        </GestureDetector>
       </View>
 
       <View style={styles.progressZone}>
         <SeekBar
           pct={pct}
+          panGestureRef={seekPanGestureRef}
+          tapGestureRef={seekTapGestureRef}
           onSeek={(ratio) => {
             const position = seekPositionFromRatio(ratio, durationMs);
             if (position !== null) seek(position);
@@ -177,21 +211,21 @@ export default function FullPlayerScreen() {
           <Text style={styles.timeText}>{formatDuration(durationMs)}</Text>
         </View>
         {playbackError ? (
-          <Pressable onPress={retry} style={styles.errorRow}>
-            <Text style={styles.errorText}>{playbackError}</Text>
-            <Text style={styles.retryText}>Retry</Text>
-          </Pressable>
+          <GestureDetector gesture={controlGestures.retry}>
+            <Pressable onPress={retry} style={styles.errorRow}>
+              <Text style={styles.errorText}>{playbackError}</Text>
+              <Text style={styles.retryText}>Retry</Text>
+            </Pressable>
+          </GestureDetector>
         ) : isBuffering ? (
           <Text style={styles.bufferingText}>Buffering…</Text>
         ) : null}
       </View>
 
-      <GestureDetector gesture={queueSwipe}>
-        <View style={styles.queuePullZone}>
-          <View style={styles.queuePullHandle} />
-          <Text style={styles.queuePullLabel}>QUEUE</Text>
-        </View>
-      </GestureDetector>
+      <View style={styles.queuePullZone}>
+        <View style={styles.queuePullHandle} />
+        <Text style={styles.queuePullLabel}>QUEUE</Text>
+      </View>
 
       <View
         style={[
@@ -199,31 +233,38 @@ export default function FullPlayerScreen() {
           { paddingBottom: Math.max(24, insets.bottom + 10) },
         ]}
       >
-        <Pressable
-          accessibilityLabel="Previous"
-          onPress={transportActions.left}
-          style={styles.sideBtn}
-          hitSlop={8}
-        >
-          <PrevGlyph />
-        </Pressable>
-        <Pressable onPress={toggle} style={styles.playBtn}>
-          {isPlaying ? (
-            <PauseBars height={26} width={5} gap={7} />
-          ) : (
-            <PlayTriangle size={22} color="#0B0B10" />
-          )}
-        </Pressable>
-        <Pressable
-          accessibilityLabel="Next"
-          onPress={transportActions.right}
-          style={styles.sideBtn}
-          hitSlop={8}
-        >
-          <NextGlyph />
-        </Pressable>
+        <GestureDetector gesture={controlGestures.previous}>
+          <Pressable
+            accessibilityLabel="Previous"
+            onPress={transportActions.left}
+            style={styles.sideBtn}
+            hitSlop={8}
+          >
+            <PrevGlyph />
+          </Pressable>
+        </GestureDetector>
+        <GestureDetector gesture={controlGestures.toggle}>
+          <Pressable onPress={toggle} style={styles.playBtn}>
+            {isPlaying ? (
+              <PauseBars height={26} width={5} gap={7} />
+            ) : (
+              <PlayTriangle size={22} color="#0B0B10" />
+            )}
+          </Pressable>
+        </GestureDetector>
+        <GestureDetector gesture={controlGestures.next}>
+          <Pressable
+            accessibilityLabel="Next"
+            onPress={transportActions.right}
+            style={styles.sideBtn}
+            hitSlop={8}
+          >
+            <NextGlyph />
+          </Pressable>
+        </GestureDetector>
       </View>
-    </View>
+      </View>
+    </GestureDetector>
   );
 }
 

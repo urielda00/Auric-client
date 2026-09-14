@@ -1,4 +1,6 @@
 const assert = require("node:assert/strict");
+const { readFileSync } = require("node:fs");
+const { join } = require("node:path");
 const test = require("node:test");
 
 const {
@@ -15,6 +17,9 @@ const {
 const {
   createCheckpointGate,
 } = require("../src/services/audio/checkpointPolicy.cjs");
+const {
+  createLatestActivationCoordinator,
+} = require("../src/services/audio/latestActivationCoordinator.cjs");
 
 const TRACK_DTO = {
   id: "018f0000-0000-7000-8000-000000000001",
@@ -76,6 +81,274 @@ function memoryStorage(initial = null) {
     },
   };
 }
+
+function activationHarness() {
+  const coordinator = createLatestActivationCoordinator();
+  let nativeGeneration = 0;
+  const effects = {
+    persisted: [],
+    history: [],
+    ended: [],
+    commits: [],
+  };
+  let state = {
+    currentTrackId: "committed",
+    currentItemId: "item-committed",
+    positionMs: 4200,
+    playbackContext: CONTEXT,
+    playedStack: [],
+    playedItems: [],
+    playbackError: null,
+  };
+
+  function isNativeCurrent(generation) {
+    return generation === nativeGeneration;
+  }
+
+  return {
+    effects,
+    get state() {
+      return state;
+    },
+    begin(trackId) {
+      const { token, baseline } = coordinator.begin(() => ({ ...state }));
+      const generation = ++nativeGeneration;
+      coordinator.attachGeneration(token, generation);
+      state = {
+        ...state,
+        currentTrackId: trackId,
+        currentItemId: `item-${trackId}`,
+        positionMs: 0,
+        playbackError: null,
+      };
+      return { trackId, token, baseline };
+    },
+    complete(operation) {
+      if (!coordinator.isCurrent(operation.token, isNativeCurrent)) {
+        return false;
+      }
+      if (
+        operation.baseline.currentTrackId &&
+        operation.baseline.currentTrackId !== operation.trackId
+      ) {
+        effects.ended.push(operation.baseline.currentTrackId);
+        effects.history.push(operation.baseline.currentTrackId);
+      }
+      state = {
+        ...state,
+        currentTrackId: operation.trackId,
+        currentItemId: `item-${operation.trackId}`,
+        playbackError: null,
+      };
+      effects.commits.push(operation.trackId);
+      effects.persisted.push(operation.trackId);
+      return coordinator.commit(operation.token, isNativeCurrent);
+    },
+    fail(operation) {
+      if (!coordinator.fail(operation.token, isNativeCurrent)) return false;
+      state = {
+        ...state,
+        currentTrackId: operation.trackId,
+        currentItemId: `item-${operation.trackId}`,
+        playbackError: "Unable to play",
+      };
+      return true;
+    },
+    canPersist() {
+      return !coordinator.hasUncommittedSelection();
+    },
+  };
+}
+
+function projectionHarness() {
+  const coordinator = createLatestActivationCoordinator();
+  let generation = 0;
+  let currentTrackId = null;
+  let logicalQueue = [];
+  const nativeProjections = [];
+
+  const isNativeCurrent = (value) => value === generation;
+  const projectLatest = () => {
+    nativeProjections.push([currentTrackId, ...logicalQueue]);
+  };
+
+  return {
+    coordinator,
+    nativeProjections,
+    begin(trackId) {
+      const { token } = coordinator.begin(() => ({}));
+      generation += 1;
+      coordinator.attachGeneration(token, generation);
+      currentTrackId = trackId;
+      logicalQueue = [];
+      return token;
+    },
+    refill(...trackIds) {
+      logicalQueue = [...new Set([...logicalQueue, ...trackIds])];
+      if (coordinator.requestProjection()) projectLatest();
+    },
+    requestProjection() {
+      if (coordinator.requestProjection()) projectLatest();
+    },
+    commit(token) {
+      const result = coordinator.commitAndTakeProjectionRequest(
+        token,
+        isNativeCurrent,
+      );
+      if (result.projectionRequested) projectLatest();
+      return result.committed;
+    },
+    reorder(trackIds) {
+      logicalQueue = [...trackIds];
+      if (coordinator.requestProjection()) projectLatest();
+    },
+  };
+}
+
+test("pending direct-play refill collapses to one latest native projection after commit", () => {
+  const harness = projectionHarness();
+  const token = harness.begin("A");
+
+  harness.refill("next", "later", "next");
+  harness.requestProjection();
+  assert.deepEqual(harness.nativeProjections, []);
+
+  assert.equal(harness.commit(token), true);
+  assert.deepEqual(harness.nativeProjections, [["A", "next", "later"]]);
+});
+
+test("rapid direct selection lets only the latest activation flush projection", () => {
+  const harness = projectionHarness();
+  const tokenA = harness.begin("A");
+  harness.refill("A-next");
+  const tokenB = harness.begin("B");
+  harness.refill("B-next", "B-later");
+
+  assert.equal(harness.commit(tokenA), false);
+  assert.deepEqual(harness.nativeProjections, []);
+  assert.equal(harness.commit(tokenB), true);
+  assert.deepEqual(harness.nativeProjections, [["B", "B-next", "B-later"]]);
+});
+
+test("post-activation reorder and background requests project normally without loops", () => {
+  const harness = projectionHarness();
+  const token = harness.begin("current");
+  harness.refill("one", "two");
+  harness.commit(token);
+
+  harness.reorder(["two", "one"]);
+  harness.requestProjection();
+  assert.deepEqual(harness.nativeProjections, [
+    ["current", "one", "two"],
+    ["current", "two", "one"],
+    ["current", "two", "one"],
+  ]);
+});
+
+test("background persistence reconciles known local successors before flushing state", () => {
+  const source = readFileSync(
+    join(process.cwd(), "src/stores/usePlayerStore.js"),
+    "utf8",
+  );
+  const persistNow = source.slice(
+    source.indexOf("async persistNow()"),
+    source.indexOf("ensureQueueDepth(options)"),
+  );
+
+  assert.ok(
+    persistNow.indexOf("waitForPending()") <
+      persistNow.indexOf("await syncNativeProjection(get)"),
+  );
+  assert.ok(
+    persistNow.indexOf("await syncNativeProjection(get)") <
+      persistNow.indexOf('persistPlaybackState(get(), "replace")'),
+  );
+  assert.doesNotMatch(persistNow, /ensureQueueDepth|recommendationService/);
+  assert.doesNotMatch(source.slice(0, source.indexOf("async function activate")), /QueueScreen/);
+});
+
+test("tap A, then B before A is ready commits only B", () => {
+  const harness = activationHarness();
+  const a = harness.begin("A");
+  const b = harness.begin("B");
+
+  assert.equal(harness.complete(a), false);
+  assert.equal(harness.complete(b), true);
+  assert.deepEqual(harness.effects.commits, ["B"]);
+});
+
+test("rapid A, B, C activation commits only C", () => {
+  const harness = activationHarness();
+  const a = harness.begin("A");
+  const b = harness.begin("B");
+  const c = harness.begin("C");
+
+  assert.equal(harness.complete(a), false);
+  assert.equal(harness.complete(b), false);
+  assert.equal(harness.complete(c), true);
+  assert.deepEqual(harness.effects.commits, ["C"]);
+});
+
+test("stale completion cannot overwrite the latest selected track", () => {
+  const harness = activationHarness();
+  const a = harness.begin("A");
+  const c = harness.begin("C");
+
+  harness.complete(c);
+  harness.complete(a);
+  assert.equal(harness.state.currentTrackId, "C");
+});
+
+test("stale failure cannot roll back the latest selected track", () => {
+  const harness = activationHarness();
+  const a = harness.begin("A");
+  harness.begin("C");
+
+  assert.equal(harness.fail(a), false);
+  assert.equal(harness.state.currentTrackId, "C");
+  assert.equal(harness.state.playbackError, null);
+});
+
+test("stale activation cannot persist or append played history", () => {
+  const harness = activationHarness();
+  const a = harness.begin("A");
+  const c = harness.begin("C");
+
+  harness.complete(a);
+  harness.complete(c);
+  assert.deepEqual(harness.effects.persisted, ["C"]);
+  assert.deepEqual(harness.effects.history, ["committed"]);
+});
+
+test("stale activation cannot end the listening session owned by the committed track", () => {
+  const harness = activationHarness();
+  const a = harness.begin("A");
+  const c = harness.begin("C");
+
+  harness.complete(a);
+  assert.deepEqual(harness.effects.ended, []);
+  harness.complete(c);
+  assert.deepEqual(harness.effects.ended, ["committed"]);
+});
+
+test("latest failed selection stays selected, coherent, and retryable", () => {
+  const harness = activationHarness();
+  const failed = harness.begin("A");
+
+  assert.equal(harness.fail(failed), true);
+  assert.equal(harness.state.currentTrackId, "A");
+  assert.equal(harness.state.currentItemId, "item-A");
+  assert.equal(harness.state.playbackError, "Unable to play");
+  assert.equal(harness.canPersist(), false);
+
+  const retry = harness.begin("A");
+  assert.equal(harness.complete(retry), true);
+  assert.equal(harness.state.currentTrackId, "A");
+  assert.equal(harness.state.playbackError, null);
+  assert.equal(harness.canPersist(), true);
+  assert.deepEqual(harness.effects.history, ["committed"]);
+  assert.deepEqual(harness.effects.ended, ["committed"]);
+});
 
 test("maps one atomic server snapshot with queue Track metadata and context", () => {
   const snapshot = mapPlaybackSnapshot(dto());

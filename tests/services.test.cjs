@@ -446,6 +446,60 @@ test("Track Player adapter ignores stale transition and progress events", async 
   assert.equal(engine.getStatus().trackId, "track-2");
 });
 
+test("reserved activation generation rejects stale load and play before native mutation", async () => {
+  const player = createFakeTrackPlayer();
+  const engine = new TrackPlayerAudioEngineCore({
+    player,
+    createSource: (track) => ({ uri: `https://auric.test/${track.id}` }),
+  });
+  const generationA = engine.beginActivation();
+  const generationB = engine.beginActivation();
+  const trackB = { ...PLAYABLE_TRACK, id: "track-B" };
+
+  await assert.rejects(
+    engine.load(PLAYABLE_TRACK, {
+      currentItemId: "item-A",
+      activationGeneration: generationA,
+    }),
+    /STALE_ACTIVATION/,
+  );
+  await engine.load(trackB, {
+    currentItemId: "item-B",
+    activationGeneration: generationB,
+  });
+  assert.throws(() => engine.play(generationA), /STALE_ACTIVATION/);
+  engine.play(generationB);
+
+  assert.deepEqual(player.queue.map((item) => item.mediaId), ["item-B"]);
+  assert.equal(engine.getStatus().trackId, "track-B");
+  assert.equal(player.calls.filter(([name]) => name === "play").length, 1);
+});
+
+test("direct activation cancels an older pending native Next transition", async () => {
+  const player = createFakeTrackPlayer();
+  const engine = new TrackPlayerAudioEngineCore({
+    player,
+    createSource: (track) => ({ uri: `https://auric.test/${track.id}` }),
+  });
+  await engine.load(PLAYABLE_TRACK, {
+    currentItemId: "item-current",
+    upcoming: [
+      {
+        itemId: "item-next",
+        track: { ...PLAYABLE_TRACK, id: "track-next" },
+      },
+    ],
+  });
+  player.skipToNext = function skipWithoutTransition() {
+    this.calls.push(["next"]);
+  };
+  const pendingNext = engine.next();
+
+  engine.beginActivation();
+
+  await assert.rejects(pendingNext, /STALE_ACTIVATION/);
+});
+
 test("cold headless transition recovers and awaits native queue synchronization", async () => {
   const player = createFakeTrackPlayer();
   const item = (trackId, itemId) => ({
@@ -666,6 +720,33 @@ test("successor projection refresh patches the native tail without interrupting 
     player.calls.filter(([name]) => name === "set-items").length,
     setCalls,
   );
+});
+
+test("repeating the same successor projection performs no duplicate native mutation", async () => {
+  const player = createFakeTrackPlayer();
+  const engine = new TrackPlayerAudioEngineCore({
+    player,
+    createSource: (track) => ({ uri: `https://auric.test/${track.id}` }),
+  });
+  const successor = {
+    id: "item-next",
+    itemId: "item-next",
+    track: { ...PLAYABLE_TRACK, id: "track-next" },
+  };
+  await engine.load(PLAYABLE_TRACK, {
+    currentItemId: "item-current",
+    upcoming: [successor],
+  });
+  const callsBefore = player.calls.length;
+
+  assert.equal(
+    engine.syncQueue(
+      { track: PLAYABLE_TRACK, itemId: "item-current" },
+      [successor],
+    ),
+    false,
+  );
+  assert.equal(player.calls.length, callsBefore);
 });
 
 test("playback policy ignores stale events and advances only for current completion", async () => {
