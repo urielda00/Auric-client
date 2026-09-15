@@ -10,13 +10,14 @@
  *   play()                   -> resume/start playback
  *   pause()                  -> pause playback
  *   seekTo(ms)                -> jump to a position
- *   next()                   -> request one native queue advancement
+ *   next()                   -> request one native queue advancement and play it
  *   syncQueue(current, next) -> patch prepared successors without interrupting current
  *   setOnStatus(fn)           -> actual loading/buffering/playback status
  *   setOnTrackChanged(fn)     -> native-owned advancement accepted by the player
  *   setOnRemoteNext(fn)       -> serialized notification/headset Next action
  *   setOnEnded(fn)            -> fn() fires when the bounded native queue is exhausted
  *   getStatus()               -> { positionMs, durationMs, isPlaying }
+ *   getNativePlaybackSnapshot() -> live active item/index/queue/play state
  *   destroy()                 -> release timers/native resources
  */
 
@@ -53,6 +54,15 @@ export class AudioEngine {
   setOnEnded(/* fn */) {}
   getStatus() {
     return { positionMs: 0, durationMs: 0, isPlaying: false };
+  }
+  getNativePlaybackSnapshot() {
+    const status = this.getStatus();
+    return {
+      nativeActiveMediaId: status.itemId || null,
+      nativeActiveIndex: status.itemId ? 0 : null,
+      nativeQueueMediaIds: status.itemId ? [status.itemId] : [],
+      nativeIsPlaying: status.isPlaying === true,
+    };
   }
   destroy() {}
 }

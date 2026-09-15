@@ -7,9 +7,73 @@ const {
   commitAfterActivation,
   createQueueRefillCoordinator,
   moveTrackToFront,
+  runExplicitNext,
   startDirectPlayback,
   takeNextWithEmergency,
 } = require("../src/services/playbackQueuePolicy.cjs");
+
+test("explicit Next reconciles a stale native queue before advancing", async () => {
+  const order = [];
+  let nativeAccepted = false;
+  const advanced = await runExplicitNext({
+    hasLogicalSuccessor: () => true,
+    reconcile: async () => {
+      order.push("reconcile");
+      nativeAccepted = true;
+      return true;
+    },
+    advance: async () => {
+      assert.equal(nativeAccepted, true);
+      order.push("advance");
+      return true;
+    },
+    emergencyRefill: async () => order.push("refill"),
+    pauseAtExhaustion: async () => order.push("pause"),
+  });
+
+  assert.equal(advanced, true);
+  assert.deepEqual(order, ["reconcile", "advance"]);
+});
+
+test("explicit Next never pauses current when logical successor reconciliation fails", async () => {
+  const order = [];
+  const advanced = await runExplicitNext({
+    hasLogicalSuccessor: () => true,
+    reconcile: async () => {
+      order.push("reconcile");
+      return false;
+    },
+    advance: async () => {
+      order.push("advance");
+      return false;
+    },
+    emergencyRefill: async () => order.push("refill"),
+    pauseAtExhaustion: async () => order.push("pause"),
+  });
+
+  assert.equal(advanced, false);
+  assert.deepEqual(order, ["reconcile"]);
+});
+
+test("explicit Next pauses only after a truly exhausted refill", async () => {
+  const order = [];
+  const advanced = await runExplicitNext({
+    hasLogicalSuccessor: () => false,
+    reconcile: async () => {
+      order.push("reconcile");
+      return true;
+    },
+    advance: async () => {
+      order.push("advance");
+      return false;
+    },
+    emergencyRefill: async () => order.push("refill"),
+    pauseAtExhaustion: async () => order.push("pause"),
+  });
+
+  assert.equal(advanced, false);
+  assert.deepEqual(order, ["refill", "pause"]);
+});
 const {
   NATIVE_SUCCESSOR_COUNT,
   appendAdvancedHistory,
@@ -19,6 +83,7 @@ const {
   consumeNativeTransition,
   createIdempotentTransitionTracker,
   createTransitionGate,
+  selectPreviousAction,
 } = require("../src/services/audio/nativeQueuePolicy.cjs");
 const {
   canOfferTrackActions,
@@ -119,17 +184,21 @@ test("long press invokes track actions without also invoking normal playback", (
   assert.equal(calls.at(-1), "play");
 });
 
-test("direct play commits queue replacement only after activation succeeds", async () => {
+test("direct play starts automatic continuation before native activation is ready", async () => {
   const order = [];
+  let resolveActivation;
   let resolveRefill;
+  const activation = new Promise((resolve) => {
+    resolveActivation = resolve;
+  });
   const refill = new Promise((resolve) => {
     resolveRefill = resolve;
   });
   const directPlay = startDirectPlayback({
     resetQueue: () => order.push("reset"),
-    activate: async () => {
+    activate: () => {
       order.push("activate");
-      return true;
+      return activation;
     },
     refill: () => {
       order.push("refill");
@@ -143,12 +212,18 @@ test("direct play commits queue replacement only after activation succeeds", asy
   await Promise.resolve();
   assert.deepEqual(order, ["activate", "reset", "refill"]);
   assert.equal(settled, false);
+  resolveActivation(true);
+  await Promise.resolve();
+  assert.equal(settled, false);
   resolveRefill(true);
   assert.equal(await directPlay, true);
 
   const preserved = ["keep"];
   const failed = await startDirectPlayback({
-    resetQueue: () => preserved.splice(0),
+    resetQueue: () => {
+      const previous = preserved.splice(0);
+      return () => preserved.push(...previous);
+    },
     activate: async () => false,
     refill: async () => {},
   });
@@ -330,6 +405,36 @@ test("Previous stages the current item first without duplicating played history"
   const result = buildPreviousQueue(current, [entry("later"), entry("current")]);
   assert.deepEqual(result.map((item) => item.trackId), ["current", "later"]);
   assert.equal(result[0].id, "current-item");
+});
+
+test("A to B to C history pops back through B and then A exactly once", () => {
+  const afterB = appendAdvancedHistory({
+    current: { id: "item-a", trackId: "a" },
+    advancedEntries: [{ id: "item-b", trackId: "b" }],
+  });
+  const afterC = appendAdvancedHistory({
+    current: { id: "item-b", trackId: "b" },
+    advancedEntries: [{ id: "item-c", trackId: "c" }],
+    playedStack: afterB.playedStack,
+    playedItems: afterB.playedItems,
+  });
+
+  assert.deepEqual(afterC.playedStack, ["a", "b"]);
+  const firstPrevious = afterC.playedItems.at(-1);
+  const secondPrevious = afterC.playedItems.slice(0, -1).at(-1);
+  assert.equal(firstPrevious.trackId, "b");
+  assert.equal(secondPrevious.trackId, "a");
+  assert.equal(new Set(afterC.playedItems.map((item) => item.id)).size, 2);
+});
+
+test("foreground and remote Previous use the same restart-then-history semantics", () => {
+  const decide = (positionMs, hasHistory = true) =>
+    selectPreviousAction({ positionMs, hasHistory, restartThresholdMs: 4000 });
+
+  assert.equal(decide(4001), "restart-current");
+  assert.equal(decide(0), "previous-track");
+  assert.equal(decide(3999), "previous-track");
+  assert.equal(decide(0, false), "restart-current");
 });
 
 test("native auth errors are non-retryable while network errors remain retryable", () => {

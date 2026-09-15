@@ -79,6 +79,8 @@ class TrackPlayerAudioEngineCore {
     transitionTimeoutMs = 8000,
     queueAcceptanceTimeoutMs = 2000,
     queueAcceptanceIntervalMs = 25,
+    explicitPlayTimeoutMs = 4000,
+    explicitPlayIntervalMs = 25,
   }) {
     this.player = player;
     this.createSource = createSource;
@@ -88,6 +90,8 @@ class TrackPlayerAudioEngineCore {
     this.transitionTimeoutMs = transitionTimeoutMs;
     this.queueAcceptanceTimeoutMs = queueAcceptanceTimeoutMs;
     this.queueAcceptanceIntervalMs = queueAcceptanceIntervalMs;
+    this.explicitPlayTimeoutMs = explicitPlayTimeoutMs;
+    this.explicitPlayIntervalMs = explicitPlayIntervalMs;
     this.initialized = false;
     this.subscriptions = [];
     this.projection = [];
@@ -244,6 +248,14 @@ class TrackPlayerAudioEngineCore {
   waitUntilReady(generation = this.generation, timeoutMs = 15000) {
     if (generation !== this.generation)
       return Promise.reject(new Error("STALE_ACTIVATION"));
+    try {
+      if (this.player.getPlaybackState?.() === "ready") {
+        this.status.isLoaded = true;
+        this.status.isBuffering = false;
+      }
+    } catch {
+      // Fall through to event-driven readiness while the controller reconnects.
+    }
     if (this.status.isLoaded) return Promise.resolve(true);
     if (this.status.error)
       return Promise.reject(new Error(this.status.error.code));
@@ -290,23 +302,35 @@ class TrackPlayerAudioEngineCore {
 
     let resolveTransition;
     let rejectTransition;
-    const promise = new Promise((resolve, reject) => {
+    const transition = new Promise((resolve, reject) => {
       resolveTransition = resolve;
       rejectTransition = reject;
     });
+    const request = transition.then(({ generation }) =>
+      this._playExplicitSuccessor(generation),
+    );
     const timeout = setTimeout(() => {
-      if (this.pendingTransition?.expectedItemId !== nextItem.mediaId) return;
-      this.pendingTransition = null;
+      if (
+        this.pendingTransition?.expectedItemId !== nextItem.mediaId ||
+        this.pendingTransition.transitioned
+      )
+        return;
       rejectTransition(new Error("NATIVE_TRANSITION_TIMEOUT"));
     }, this.transitionTimeoutMs);
-    this.pendingTransition = {
+    const pending = {
       expectedItemId: nextItem.mediaId,
       reason,
-      promise,
+      promise: null,
       resolve: resolveTransition,
       reject: rejectTransition,
       timeout,
+      transitioned: false,
     };
+    const promise = request.finally(() => {
+      if (this.pendingTransition === pending) this.pendingTransition = null;
+    });
+    pending.promise = promise;
+    this.pendingTransition = pending;
     try {
       this.player.skipToNext();
     } catch (error) {
@@ -317,7 +341,7 @@ class TrackPlayerAudioEngineCore {
     return promise;
   }
 
-  syncQueue(current, upcoming = []) {
+  async syncQueue(current, upcoming = []) {
     if (!current?.track || !this.itemId) return false;
     const desired = buildNativeProjection({
       current,
@@ -326,47 +350,35 @@ class TrackPlayerAudioEngineCore {
         upcoming.find((item) => item.trackId === trackId)?.track,
       isPlayable: (track) => track?.hasMedia === true,
     });
-    const active = this.player.getActiveMediaItem();
-    if (!active || active.mediaId !== current.itemId) return false;
-    const initialActiveIndex = this.player.getActiveMediaItemIndex() ?? 0;
-    if (sameProjection(this.projection, desired) && initialActiveIndex === 0) {
-      return false;
-    }
-
     const nextItems = desired.map((item) => nativeItem(item, this.createSource));
-    let activeIndex = initialActiveIndex;
-    if (activeIndex > 0) {
-      this.player.removeMediaItems(0, activeIndex);
-      activeIndex = 0;
-    }
-    const queue = this.player.getQueue();
-    for (let index = 1; index < nextItems.length; index += 1) {
-      const existing = queue[index];
-      const desiredItem = nextItems[index];
-      if (!existing) {
-        this.player.addMediaItem(publicNativeItem(desiredItem));
-      } else if (existing.mediaId !== desiredItem.mediaId) {
-        this.player.replaceMediaItem(index, publicNativeItem(desiredItem));
-      }
-    }
-    const currentQueueLength = this.player.getQueue().length;
-    if (currentQueueLength > nextItems.length) {
-      this.player.removeMediaItems(nextItems.length, currentQueueLength);
-    }
-    this.projection = desired;
-    this.nativeItems = nextItems;
-    return true;
+    return this._syncQueueWhenControllerReady(
+      current,
+      desired,
+      nextItems,
+      this.generation,
+    );
   }
 
   handleNativeEvent(event) {
+    let adopted = null;
     if (event?.type !== EVENT.MEDIA_ITEM_TRANSITION && !this.itemId) {
-      this._adoptActiveNativeState();
+      adopted = this._adoptActiveNativeState();
     }
     switch (event?.type) {
       case EVENT.PLAYBACK_STATE:
         return this._handlePlaybackState(event.state);
       case EVENT.IS_PLAYING:
         this.status.isPlaying = event.playing === true;
+        if (!this.status.isPlaying) {
+          try {
+            // Android can deliver A's final paused event after B has already
+            // honored explicit play. Never let that stale event overwrite the
+            // active player's authoritative playing state.
+            this.status.isPlaying = this.player.isPlaying() === true;
+          } catch {
+            // Keep the event-derived state while the controller reconnects.
+          }
+        }
         if (
           this.status.isPlaying &&
           this.diagnostics &&
@@ -390,9 +402,9 @@ class TrackPlayerAudioEngineCore {
       case EVENT.PLAYBACK_ERROR:
         return this._handleError(event);
       case EVENT.REMOTE_NEXT:
-        return this.onRemoteNext?.();
+        return this._handleRemoteCommand(adopted, this.onRemoteNext);
       case EVENT.REMOTE_PREVIOUS:
-        return this.onRemotePrevious?.();
+        return this._handleRemoteCommand(adopted, this.onRemotePrevious);
       default:
         return undefined;
     }
@@ -445,6 +457,32 @@ class TrackPlayerAudioEngineCore {
 
   getDiagnostics() {
     return this.diagnostics ? { ...this.diagnostics } : null;
+  }
+
+  getNativePlaybackSnapshot() {
+    let active = null;
+    let activeIndex = null;
+    let queue = [];
+    let isPlaying = false;
+    try {
+      // Bypass cached projection and event-derived state. RNTP is the source
+      // of truth for queue synchronization and real-device diagnostics.
+      active = this.player.getActiveMediaItem?.() || null;
+      activeIndex = this.player.getActiveMediaItemIndex?.() ?? null;
+      queue = this.player.getQueue?.() || [];
+      isPlaying = this.player.isPlaying?.() === true;
+    } catch {
+      // A controller reconnect can make one diagnostic read temporarily empty.
+    }
+    return {
+      nativeActiveMediaId:
+        active?.extras?.itemId || active?.mediaId || null,
+      nativeActiveIndex: activeIndex,
+      nativeQueueMediaIds: queue
+        .map((item) => item.extras?.itemId || item.mediaId)
+        .filter(Boolean),
+      nativeIsPlaying: isPlaying,
+    };
   }
 
   destroy() {
@@ -511,6 +549,119 @@ class TrackPlayerAudioEngineCore {
       );
     } while (this.now() < deadline);
     throw new Error("NATIVE_QUEUE_NOT_READY");
+  }
+
+  async _syncQueueWhenControllerReady(
+    current,
+    desired,
+    nextItems,
+    generation,
+  ) {
+    const expectedIds = nextItems.map((item) => item.mediaId);
+    const deadline = this.now() + this.queueAcceptanceTimeoutMs;
+    let mutated = false;
+    do {
+      if (generation !== this.generation) {
+        throw new Error("STALE_PROJECTION");
+      }
+      const active = this.player.getActiveMediaItem?.();
+      const activeIndex = this.player.getActiveMediaItemIndex?.();
+      if (!active) {
+        await new Promise((resolve) =>
+          setTimeout(resolve, this.queueAcceptanceIntervalMs),
+        );
+        continue;
+      }
+      if (active.mediaId !== current.itemId) {
+        if (active.mediaId !== this.itemId) {
+          void this._handleTransition({ item: active, index: activeIndex });
+        } else {
+          // A cold headless adoption can know RNTP's active item before Zustand
+          // has consumed the missed transition. Notify the canonical store from
+          // the native path; its transition tracker keeps history idempotent.
+          void this._notifyAdoptedActiveItem(active, activeIndex);
+        }
+        return false;
+      }
+
+      const queue = this.player.getQueue();
+      const queueIds = queue.map((item) => item.mediaId);
+      if (
+        activeIndex === 0 &&
+        queueIds.length === expectedIds.length &&
+        queueIds.every((id, index) => id === expectedIds[index])
+      ) {
+        const changed = mutated || !sameProjection(this.projection, desired);
+        this.projection = desired;
+        this.nativeItems = nextItems;
+        return changed;
+      }
+
+      // Apply one idempotent mutation per observation. RNTP's Android bridge
+      // posts queue writes to the main-thread MediaController, so immediately
+      // caching the desired projection can otherwise outrun native acceptance.
+      if (Number.isInteger(activeIndex) && activeIndex > 0) {
+        this.player.removeMediaItems(0, activeIndex);
+        mutated = true;
+      } else {
+        const mismatch = expectedIds.findIndex(
+          (id, index) => queueIds[index] !== id,
+        );
+        if (mismatch >= 1 && mismatch < queue.length) {
+          this.player.replaceMediaItem(
+            mismatch,
+            publicNativeItem(nextItems[mismatch]),
+          );
+          mutated = true;
+        } else if (mismatch >= 1) {
+          this.player.addMediaItem(publicNativeItem(nextItems[mismatch]));
+          mutated = true;
+        } else if (queue.length > nextItems.length) {
+          this.player.removeMediaItems(nextItems.length, queue.length);
+          mutated = true;
+        }
+      }
+      await new Promise((resolve) =>
+        setTimeout(resolve, this.queueAcceptanceIntervalMs),
+      );
+    } while (this.now() < deadline);
+    throw new Error("NATIVE_QUEUE_NOT_READY");
+  }
+
+  async _playExplicitSuccessor(generation) {
+    await this.waitUntilReady(generation);
+    if (!this.isGenerationCurrent(generation)) {
+      throw new Error("STALE_ACTIVATION");
+    }
+    this.play(generation);
+    const deadline = this.now() + this.explicitPlayTimeoutMs;
+    do {
+      if (!this.isGenerationCurrent(generation)) {
+        throw new Error("STALE_ACTIVATION");
+      }
+      try {
+        if (this.player.isPlaying() === true) {
+          this.status.isPlaying = true;
+          this._emitStatus();
+          return true;
+        }
+      } catch {
+        if (this.status.isPlaying) return true;
+      }
+      await new Promise((resolve) =>
+        setTimeout(resolve, this.explicitPlayIntervalMs),
+      );
+    } while (this.now() < deadline);
+    throw new Error("NATIVE_PLAYBACK_DID_NOT_START");
+  }
+
+  _handleRemoteCommand(adopted, callback) {
+    if (!adopted) return callback?.();
+    const reconciliation = this._notifyAdoptedActiveItem(
+      adopted.active,
+      adopted.activeIndex,
+    );
+    return Promise.resolve(reconciliation).then(() => callback?.());
   }
 
   _handlePlaybackState(state) {
@@ -587,10 +738,12 @@ class TrackPlayerAudioEngineCore {
       pending?.expectedItemId === transition.itemId
         ? pending.reason
         : "completed";
-    if (pending?.expectedItemId === transition.itemId) {
+    if (
+      pending?.expectedItemId === transition.itemId &&
+      !pending.transitioned
+    ) {
       clearTimeout(pending.timeout);
-      this.pendingTransition = null;
-      pending.resolve(true);
+      pending.transitioned = true;
     }
     if (suppressed) {
       this.suppressedActivationItemId = null;
@@ -632,7 +785,29 @@ class TrackPlayerAudioEngineCore {
       generation: this.generation,
     });
     this._emitStatus();
+    if (pending?.transitioned) {
+      pending.resolve({ generation: this.generation });
+    }
     return backgroundWork;
+  }
+
+  _notifyAdoptedActiveItem(active, activeIndex) {
+    const nativeQueue = this._readNativeQueue();
+    const nativeItemIds = nativeQueue
+      .slice(0, Math.max(0, (activeIndex ?? 0) + 1))
+      .map((item) => item.extras?.itemId || item.mediaId)
+      .filter(Boolean);
+    return this.onTrackChanged?.({
+      trackId: active.extras?.trackId || null,
+      itemId: active.extras?.itemId || active.mediaId || null,
+      context: active.extras?.context || null,
+      nativeIndex: activeIndex,
+      nativeItemIds,
+      previousTrackId: null,
+      previousItemId: null,
+      reason: "completed",
+      generation: this.generation,
+    });
   }
 
   _handleError(event) {
@@ -724,10 +899,15 @@ class TrackPlayerAudioEngineCore {
         context: item.extras?.context || null,
         isCurrent: item.mediaId === this.itemId,
       }));
+      return {
+        active,
+        activeIndex: this.player.getActiveMediaItemIndex?.() ?? 0,
+      };
     } catch {
       // A headless event may race the media-controller connection; the event
       // remains safe to ignore until the next native callback supplies state.
     }
+    return null;
   }
 
   _emitStatus() {

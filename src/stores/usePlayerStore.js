@@ -40,14 +40,17 @@ const {
 const {
   DEFAULT_QUEUE_TARGET,
   createQueueRefillCoordinator,
+  runExplicitNext,
   startDirectPlayback,
 } = require("../services/playbackQueuePolicy.cjs");
 const {
+  NATIVE_SUCCESSOR_COUNT,
   appendAdvancedHistory,
   buildPreviousQueue,
   consumeNativeTransition,
   createIdempotentTransitionTracker,
   createTransitionGate,
+  selectPreviousAction,
 } = require("../services/audio/nativeQueuePolicy.cjs");
 const {
   notifyExplicitPlaybackSelection,
@@ -56,6 +59,9 @@ const {
 const CHECKPOINT_INTERVAL_MS = 15000;
 const RESTART_THRESHOLD_MS = 4000;
 const PLAYED_STACK_LIMIT = 50;
+const NATIVE_PROJECTION_RETRY_DELAY_MS = 125;
+const NATIVE_PROJECTION_ATTEMPTS = 2;
+const POST_PROJECTION_DIAGNOSTIC_DELAY_MS = 350;
 
 const checkpointGate = createCheckpointGate(CHECKPOINT_INTERVAL_MS);
 const activations = createLatestActivationCoordinator();
@@ -63,6 +69,8 @@ const recommendationRequests = createRecommendationRequestCoordinator();
 let queueRefillCoordinator = null;
 let localHydration = null;
 let backgroundReconciliation = null;
+let nativeProjectionSync = null;
+let nativeProjectionDirty = false;
 const nextTransitionGate = createTransitionGate();
 const nativeTransitions = createIdempotentTransitionTracker();
 
@@ -170,7 +178,12 @@ export const usePlayerStore = create((set, get) => ({
       get().handleNativeTrackChanged(event),
     );
     audioEngine.setOnRemoteNext?.(() => get().next("skipped_next"));
-    audioEngine.setOnRemotePrevious?.(() => get().previous());
+    audioEngine.setOnRemotePrevious?.(() =>
+      get().previous({
+        source: "remote",
+        backgroundSessionReady: get().hydrated,
+      }),
+    );
     audioEngine.setOnEnded(
       createCompletionHandler({
         getCurrentTrackId: () => get().currentTrackId,
@@ -242,10 +255,11 @@ export const usePlayerStore = create((set, get) => ({
       persist: false,
       refill: false,
     });
-    await syncNativeProjection(get);
+    const durableHistory = persistPlaybackState(get(), "replace");
+    void get().ensureQueueDepth();
     await Promise.allSettled([
-      persistPlaybackState(get(), "replace"),
-      get().ensureQueueDepth(),
+      durableHistory,
+      syncNativeProjection(get),
     ]);
     await syncNativeProjection(get);
     return true;
@@ -300,6 +314,13 @@ export const usePlayerStore = create((set, get) => ({
   async play(trackId, context, queueItemId) {
     const track = useLibraryStore.getState().getTrackById(trackId);
     if (!track || !isTrackPlayable(track)) return;
+    const previousQueueEntries = useQueueStore.getState().entries;
+    const previousShuffle = {
+      shuffleMode: get().shuffleMode,
+      shufflePending: get().shufflePending,
+      shuffleError: get().shuffleError,
+    };
+    const directItemId = queueItemId || generateUuid();
     recommendationRequests.invalidate();
     getQueueRefillCoordinator().invalidate({ refillAfterPending: true });
     playbackStateService.markLocalChange();
@@ -307,6 +328,19 @@ export const usePlayerStore = create((set, get) => ({
       resetQueue: () => {
         useQueueStore.getState().clear({ persist: false, refill: false });
         set({ shuffleMode: null, shufflePending: null, shuffleError: null });
+        return () => {
+          if (
+            get().currentItemId !== directItemId ||
+            !get().playbackError
+          )
+            return;
+          getQueueRefillCoordinator().invalidate();
+          useQueueStore.getState().replaceEntries(previousQueueEntries, {
+            persist: false,
+            refill: false,
+          });
+          set(previousShuffle);
+        };
       },
       activate: () =>
         activate(
@@ -317,17 +351,34 @@ export const usePlayerStore = create((set, get) => ({
           {
             pushCurrentToStack: true,
             endPreviousReason: "replaced",
-            currentItemId: queueItemId,
+            currentItemId: directItemId,
             upcomingEntries: [],
             openFullPlayer: true,
+            activationDiagnosticReason: "direct activation committed",
           },
         ),
       refill: async () => {
         await get().ensureQueueDepth();
         await getQueueRefillCoordinator().waitForPending();
+        logPlaybackDiagnostic("direct refill completed", get);
       },
     });
     if (activated) {
+      const accepted = await reconcileNativeProjection(get);
+      logPlaybackDiagnostic("post-refill projection completed", get);
+      schedulePlaybackDiagnostic(
+        "post-refill projection settled",
+        get,
+        get().currentItemId,
+      );
+      if (
+        !accepted &&
+        nativeEntries(useQueueStore.getState().entries).length > 0
+      ) {
+        logPlaybackDiagnostic("direct projection reconciliation failed", get, {
+          level: "error",
+        });
+      }
       void persistPlaybackState(get(), "replace");
     }
     return activated;
@@ -358,6 +409,8 @@ export const usePlayerStore = create((set, get) => ({
         persist: false,
         refill: false,
       });
+      await reconcileNativeProjection(get);
+      logPlaybackDiagnostic("playQueued activation committed", get);
       void persistPlaybackState(get(), "replace");
     }
     void get().ensureQueueDepth();
@@ -420,25 +473,50 @@ export const usePlayerStore = create((set, get) => ({
     void persistPlaybackState(get(), "checkpoint");
   },
 
-  async previous() {
+  async previous({ source = "foreground", backgroundSessionReady = false } = {}) {
     playbackStateService.markLocalChange();
     const {
-      positionMs,
       playedStack,
       playedItems,
       currentTrackId,
       currentItemId,
     } = get();
-    if (positionMs > RESTART_THRESHOLD_MS || !playedStack.length) {
-      set({ playbackContext: contextFor("direct", "Previous") });
+    const nativeStatus = audioEngine.getStatus();
+    const positionMs =
+      nativeStatus.trackId === currentTrackId &&
+      nativeStatus.itemId === currentItemId &&
+      Number.isFinite(nativeStatus.positionMs)
+        ? nativeStatus.positionMs
+        : get().positionMs;
+    const previousAction = selectPreviousAction({
+      positionMs,
+      hasHistory: playedStack.length > 0,
+      restartThresholdMs: RESTART_THRESHOLD_MS,
+    });
+    if (source === "remote") {
+      logRemotePreviousDiagnostic({
+        backgroundSessionReady,
+        currentTrackId,
+        currentItemId,
+        liveNativePositionMs: positionMs,
+        playedItems,
+        playedStack,
+        previousAction,
+      });
+    }
+    if (previousAction === "restart-current") {
       await get().seek(0);
       await persistPlaybackState(get(), "replace");
-      return;
+      return true;
     }
     const previousItem = playedItems[playedItems.length - 1];
     const prevId = previousItem?.trackId || playedStack[playedStack.length - 1];
     const track = useLibraryStore.getState().getTrackById(prevId);
-    if (!track || !isTrackPlayable(track)) return;
+    if (!track || !isTrackPlayable(track)) {
+      await get().seek(0);
+      await persistPlaybackState(get(), "replace");
+      return true;
+    }
     const queue = useQueueStore.getState();
     const upcomingEntries = buildPreviousQueue(
       currentTrackId
@@ -472,24 +550,25 @@ export const usePlayerStore = create((set, get) => ({
       refill: false,
     });
     await persistPlaybackState(get(), "replace");
+    return true;
   },
 
   async next(endedReason = "skipped_next") {
     return nextTransitionGate.run(async () => {
       playbackStateService.markLocalChange();
-      await syncNativeProjection(get);
       try {
-        let advanced = await audioEngine.next(endedReason);
-        if (!advanced && !useQueueStore.getState().entries.length) {
-          await get().ensureQueueDepth({ emergency: true, force: true });
-          await syncNativeProjection(get);
-          advanced = await audioEngine.next(endedReason);
-        }
-        if (advanced) return true;
-        await audioEngine.pause();
-        set({ isPlaying: false, isBuffering: false, isLoading: false });
-        void persistPlaybackState(get(), "replace");
-        return false;
+        return await runExplicitNext({
+          hasLogicalSuccessor: hasPlayableLogicalSuccessor,
+          reconcile: () => reconcileNativeProjection(get),
+          advance: () => audioEngine.next(endedReason),
+          emergencyRefill: () =>
+            get().ensureQueueDepth({ emergency: true, force: true }),
+          pauseAtExhaustion: async () => {
+            await audioEngine.pause();
+            set({ isPlaying: false, isBuffering: false, isLoading: false });
+            void persistPlaybackState(get(), "replace");
+          },
+        });
       } catch (error) {
         if (error?.message === "STALE_ACTIVATION") return false;
         set({
@@ -611,6 +690,7 @@ async function activate(
     currentItemId,
     upcomingEntries = useQueueStore.getState().entries,
     openFullPlayer = false,
+    activationDiagnosticReason = null,
   },
 ) {
   if (!isTrackPlayable(track)) return false;
@@ -686,9 +766,10 @@ async function activate(
       isNativeCurrent,
     );
     if (!committed.committed) return false;
-    if (committed.projectionRequested) {
-      await syncNativeProjection(get);
+    if (activationDiagnosticReason) {
+      logPlaybackDiagnostic(activationDiagnosticReason, get);
     }
+    await syncNativeProjection(get);
     listeningTracker.handleStatus(nativeStatus, context);
     checkpointGate.reset(Date.now());
     return true;
@@ -730,24 +811,158 @@ function nativeEntries(entries) {
     .filter((item) => isTrackPlayable(item.track));
 }
 
+function hasPlayableLogicalSuccessor() {
+  return nativeEntries(useQueueStore.getState().entries).length > 0;
+}
+
+function expectedNativeMediaIds(get) {
+  const currentItemId = get().currentItemId;
+  if (!currentItemId) return [];
+  return [
+    currentItemId,
+    ...nativeEntries(useQueueStore.getState().entries)
+      .slice(0, NATIVE_SUCCESSOR_COUNT)
+      .map((item) => item.itemId),
+  ];
+}
+
+function nativeProjectionAccepted(get) {
+  const expectedIds = expectedNativeMediaIds(get);
+  const native = audioEngine.getNativePlaybackSnapshot?.();
+  if (!native || !expectedIds.length) return false;
+  return (
+    native.nativeActiveMediaId === expectedIds[0] &&
+    native.nativeActiveIndex === 0 &&
+    native.nativeQueueMediaIds.length === expectedIds.length &&
+    native.nativeQueueMediaIds.every((id, index) => id === expectedIds[index])
+  );
+}
+
+async function reconcileNativeProjection(
+  get,
+  {
+    attempts = NATIVE_PROJECTION_ATTEMPTS,
+    retryDelayMs = NATIVE_PROJECTION_RETRY_DELAY_MS,
+  } = {},
+) {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    await syncNativeProjection(get);
+    if (nativeProjectionAccepted(get)) return true;
+    if (attempt + 1 < attempts) {
+      await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+    }
+  }
+  return false;
+}
+
+function isDevelopmentBuild() {
+  return typeof __DEV__ !== "undefined" && __DEV__;
+}
+
+function logPlaybackDiagnostic(reason, get, { level = "debug" } = {}) {
+  if (!isDevelopmentBuild()) return null;
+  const state = get();
+  const native = audioEngine.getNativePlaybackSnapshot?.() || {
+    nativeActiveMediaId: null,
+    nativeActiveIndex: null,
+    nativeQueueMediaIds: [],
+    nativeIsPlaying: false,
+  };
+  const snapshot = {
+    reason,
+    logicalCurrentItemId: state.currentItemId,
+    logicalUpcomingItemIds: useQueueStore
+      .getState()
+      .entries.map((item) => item.id),
+    ...native,
+  };
+  const logger = level === "error" ? console.error : console.debug;
+  logger("[AuricPlayback]", snapshot);
+  return snapshot;
+}
+
+function schedulePlaybackDiagnostic(reason, get, expectedCurrentItemId) {
+  if (!isDevelopmentBuild()) return;
+  setTimeout(() => {
+    if (get().currentItemId === expectedCurrentItemId) {
+      logPlaybackDiagnostic(reason, get);
+    }
+  }, POST_PROJECTION_DIAGNOSTIC_DELAY_MS);
+}
+
+function logRemotePreviousDiagnostic({
+  backgroundSessionReady,
+  currentTrackId,
+  currentItemId,
+  liveNativePositionMs,
+  playedItems,
+  playedStack,
+  previousAction,
+}) {
+  if (!isDevelopmentBuild()) return;
+  const previousItem = playedItems[playedItems.length - 1];
+  console.debug("[AuricRemotePrevious]", {
+    remotePreviousReceived: true,
+    backgroundSessionReady: backgroundSessionReady === true,
+    currentTrackId,
+    currentItemId,
+    liveNativePositionMs,
+    playedItemsCount: playedItems.length,
+    previousTrackId:
+      previousItem?.trackId || playedStack[playedStack.length - 1] || null,
+    chosenAction: previousAction,
+  });
+}
+
 async function syncNativeProjection(get) {
   if (!activations.requestProjection()) return false;
-  const state = get();
-  if (!state.currentTrackId || !state.currentItemId) return false;
-  const track = state.getCurrentTrack();
-  if (!track || !isTrackPlayable(track)) return false;
-  try {
-    return await audioEngine.syncQueue(
-      {
-        track,
-        itemId: state.currentItemId,
-        context: state.playbackContext,
-      },
-      nativeEntries(useQueueStore.getState().entries),
-    );
-  } catch {
-    return false;
-  }
+  nativeProjectionDirty = true;
+  if (nativeProjectionSync) return nativeProjectionSync;
+
+  const request = (async () => {
+    let changed = false;
+    while (nativeProjectionDirty) {
+      nativeProjectionDirty = false;
+      const state = get();
+      if (!state.currentTrackId || !state.currentItemId) continue;
+      const track = state.getCurrentTrack();
+      if (!track || !isTrackPlayable(track)) continue;
+      const itemId = state.currentItemId;
+      const entryIds = useQueueStore
+        .getState()
+        .entries.map((item) => item.id)
+        .join(">");
+      try {
+        changed =
+          (await audioEngine.syncQueue(
+            {
+              track,
+              itemId,
+              context: state.playbackContext,
+            },
+            nativeEntries(useQueueStore.getState().entries),
+          )) || changed;
+      } catch {
+        // A later queue/native event requests another bounded reconciliation.
+      }
+      const latest = get();
+      const latestEntryIds = useQueueStore
+        .getState()
+        .entries.map((item) => item.id)
+        .join(">");
+      if (latest.currentItemId !== itemId || latestEntryIds !== entryIds) {
+        nativeProjectionDirty = true;
+      }
+    }
+    return changed;
+  })();
+  nativeProjectionSync = request.finally(() => {
+    if (nativeProjectionSync === request || nativeProjectionSync === wrapped) {
+      nativeProjectionSync = null;
+    }
+  });
+  const wrapped = nativeProjectionSync;
+  return wrapped;
 }
 
 async function persistPlaybackState(state, mode) {

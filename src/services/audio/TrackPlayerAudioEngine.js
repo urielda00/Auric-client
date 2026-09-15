@@ -33,8 +33,8 @@ export class TrackPlayerAudioEngine extends TrackPlayerAudioEngineCore {
     this.notificationPermissionRequested = false;
   }
 
-  play() {
-    const result = super.play();
+  play(generation) {
+    const result = super.play(generation);
     this._requestNotificationPermissionAfterPlaybackStarts();
     return result;
   }

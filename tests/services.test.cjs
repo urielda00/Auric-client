@@ -33,6 +33,9 @@ const {
   normalizeRestoredPosition,
   takeNextPlayable,
 } = require("../src/services/audio/playbackPolicy.cjs");
+const {
+  startDirectPlayback,
+} = require("../src/services/playbackQueuePolicy.cjs");
 
 const DTO = {
   id: "018f0000-0000-7000-8000-000000000001",
@@ -267,6 +270,7 @@ function createFakeTrackPlayer() {
     queue: [],
     activeIndex: null,
     playing: false,
+    playbackState: "idle",
     progress: { position: 0, duration: 0, buffered: 0, cached: 0 },
     setupPlayer(config) {
       calls.push(["setup", config]);
@@ -279,6 +283,7 @@ function createFakeTrackPlayer() {
       return { remove: () => listeners.delete(type) };
     },
     emit(type, payload) {
+      if (type === EVENT.PLAYBACK_STATE) this.playbackState = payload.state;
       listeners.get(type)?.(payload);
     },
     setMediaItems(items, startIndex) {
@@ -333,9 +338,13 @@ function createFakeTrackPlayer() {
         item: this.queue[this.activeIndex],
         index: this.activeIndex,
       });
+      this.emit(EVENT.PLAYBACK_STATE, { state: "ready" });
     },
     getProgress() {
       return { ...this.progress };
+    },
+    getPlaybackState() {
+      return this.playbackState;
     },
     isPlaying() {
       return this.playing;
@@ -408,6 +417,50 @@ test("Track Player adapter configures native queue, media controls, and real sta
     itemId: "item-1",
     generation: 1,
   });
+});
+
+test("Quick Play projects successors without QueueScreen or activation readiness", async () => {
+  const player = createFakeTrackPlayer();
+  const engine = new TrackPlayerAudioEngineCore({
+    player,
+    createSource: (track) => ({ uri: `https://auric.test/${track.id}` }),
+  });
+  const successors = ["a", "b", "c"].map((id) => ({
+    itemId: `item-${id}`,
+    track: { ...PLAYABLE_TRACK, id: `track-${id}` },
+  }));
+  let finishActivation;
+  const nativeReady = new Promise((resolve) => {
+    finishActivation = resolve;
+  });
+
+  const direct = startDirectPlayback({
+    activate: async () => {
+      await engine.load(PLAYABLE_TRACK, { currentItemId: "item-current" });
+      await nativeReady;
+      return true;
+    },
+    resetQueue: () => {},
+    refill: () =>
+      engine.syncQueue(
+        { track: PLAYABLE_TRACK, itemId: "item-current" },
+        successors,
+      ),
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(player.queue.map((item) => item.mediaId), [
+    "item-current",
+    "item-a",
+  ]);
+
+  finishActivation();
+  assert.equal(await direct, true);
+  assert.deepEqual(player.queue.map((item) => item.mediaId), [
+    "item-current",
+    "item-a",
+    "item-b",
+    "item-c",
+  ]);
 });
 
 test("Track Player adapter rejects metadata-only tracks at the playback boundary", async () => {
@@ -542,7 +595,7 @@ test("cold headless transition recovers and awaits native queue synchronization"
   assert.equal(transitions[0].itemId, "item-next");
   assert.equal(engine.getStatus().isPlaying, true);
 
-  const synchronized = engine.syncQueue(
+  const synchronized = await engine.syncQueue(
     {
       track: { ...PLAYABLE_TRACK, id: "track-next" },
       itemId: "item-next",
@@ -561,6 +614,48 @@ test("cold headless transition recovers and awaits native queue synchronization"
   assert.deepEqual(player.queue.map((entry) => entry.mediaId), [
     "item-next",
     "item-later",
+  ]);
+});
+
+test("cold adopted native active item is reconciled instead of silently rejected", async () => {
+  const player = createFakeTrackPlayer();
+  const item = (trackId, itemId) => ({
+    mediaId: itemId,
+    url: { uri: `https://auric.test/${trackId}` },
+    extras: { trackId, itemId, context: { type: "manual_queue" } },
+  });
+  player.queue = [
+    item("track-current", "item-current"),
+    item("track-next", "item-next"),
+  ];
+  player.activeIndex = 1;
+  const engine = new TrackPlayerAudioEngineCore({
+    player,
+    createSource: (track) => ({ uri: `https://auric.test/${track.id}` }),
+  });
+  const transitions = [];
+  engine.setOnTrackChanged((event) => transitions.push(event));
+  engine.handleNativeEvent({ type: EVENT.IS_PLAYING, playing: true });
+
+  const changed = await engine.syncQueue(
+    {
+      track: { ...PLAYABLE_TRACK, id: "track-current" },
+      itemId: "item-current",
+    },
+    [
+      {
+        itemId: "item-next",
+        track: { ...PLAYABLE_TRACK, id: "track-next" },
+      },
+    ],
+  );
+
+  assert.equal(changed, false);
+  assert.equal(transitions.length, 1);
+  assert.equal(transitions[0].itemId, "item-next");
+  assert.deepEqual(transitions[0].nativeItemIds, [
+    "item-current",
+    "item-next",
   ]);
 });
 
@@ -596,10 +691,34 @@ test("remote and in-app Next share one pending native transition", async () => {
     item: active,
     index: player.activeIndex,
   });
+  engine.handleNativeEvent({ type: EVENT.PLAYBACK_STATE, state: "ready" });
   assert.equal(await remote, true);
   assert.equal(await inApp, true);
   assert.equal(transitionCount, 1);
   assert.equal(engine.getStatus().itemId, "item-next");
+  assert.equal(player.playing, true);
+});
+
+test("explicit Next keeps playing when current playback was already playing", async () => {
+  const player = createFakeTrackPlayer();
+  const engine = new TrackPlayerAudioEngineCore({
+    player,
+    createSource: (track) => ({ uri: `https://auric.test/${track.id}` }),
+  });
+  await engine.load(PLAYABLE_TRACK, {
+    currentItemId: "item-current",
+    upcoming: [
+      {
+        itemId: "item-next",
+        track: { ...PLAYABLE_TRACK, id: "track-next" },
+      },
+    ],
+  });
+  engine.play();
+
+  assert.equal(await engine.next("skipped_next"), true);
+  assert.equal(player.getActiveMediaItem().mediaId, "item-next");
+  assert.equal(player.playing, true);
 });
 
 test("authenticated native stream failure is specific, clears once, and never retries", async () => {
@@ -704,7 +823,7 @@ test("successor projection refresh patches the native tail without interrupting 
     upcoming: [spec("a"), spec("b"), spec("c")],
   });
   const setCalls = player.calls.filter(([name]) => name === "set-items").length;
-  const changed = engine.syncQueue(
+  const changed = await engine.syncQueue(
     { track: PLAYABLE_TRACK, itemId: "current-item" },
     [spec("play-next"), spec("a"), spec("b")],
   );
@@ -740,13 +859,296 @@ test("repeating the same successor projection performs no duplicate native mutat
   const callsBefore = player.calls.length;
 
   assert.equal(
-    engine.syncQueue(
+    await engine.syncQueue(
       { track: PLAYABLE_TRACK, itemId: "item-current" },
       [successor],
     ),
     false,
   );
   assert.equal(player.calls.length, callsBefore);
+});
+
+test("cached projection cannot hide a native queue that dropped its successors", async () => {
+  const player = createFakeTrackPlayer();
+  const engine = new TrackPlayerAudioEngineCore({
+    player,
+    createSource: (track) => ({ uri: `https://auric.test/${track.id}` }),
+  });
+  const successor = {
+    id: "item-next",
+    itemId: "item-next",
+    track: { ...PLAYABLE_TRACK, id: "track-next" },
+  };
+  await engine.load(PLAYABLE_TRACK, {
+    currentItemId: "item-current",
+    upcoming: [successor],
+  });
+
+  // Reproduces the device gap: JS remembers the intended projection while
+  // RNTP exposes only the active item.
+  player.queue = [player.queue[0]];
+  player.activeIndex = 0;
+
+  assert.equal(
+    await engine.syncQueue(
+      { track: PLAYABLE_TRACK, itemId: "item-current" },
+      [successor],
+    ),
+    true,
+  );
+  assert.deepEqual(player.queue.map((item) => item.mediaId), [
+    "item-current",
+    "item-next",
+  ]);
+});
+
+test("projection waits for delayed native tail acceptance before caching success", async () => {
+  const player = createFakeTrackPlayer();
+  const immediateAdd = player.addMediaItem;
+  player.addMediaItem = function delayedAdd(item) {
+    setTimeout(() => immediateAdd.call(this, item), 5);
+  };
+  const engine = new TrackPlayerAudioEngineCore({
+    player,
+    createSource: (track) => ({ uri: `https://auric.test/${track.id}` }),
+    queueAcceptanceIntervalMs: 10,
+  });
+  await engine.load(PLAYABLE_TRACK, { currentItemId: "item-current" });
+  const successors = ["a", "b", "c"].map((id) => ({
+    id: `item-${id}`,
+    itemId: `item-${id}`,
+    track: { ...PLAYABLE_TRACK, id: `track-${id}` },
+  }));
+
+  assert.equal(
+    await engine.syncQueue(
+      { track: PLAYABLE_TRACK, itemId: "item-current" },
+      successors,
+    ),
+    true,
+  );
+  assert.deepEqual(player.queue.map((item) => item.mediaId), [
+    "item-current",
+    "item-a",
+    "item-b",
+    "item-c",
+  ]);
+});
+
+test("failed native acceptance never caches the requested projection", async () => {
+  const player = createFakeTrackPlayer();
+  const engine = new TrackPlayerAudioEngineCore({
+    player,
+    createSource: (track) => ({ uri: `https://auric.test/${track.id}` }),
+    queueAcceptanceTimeoutMs: 10,
+    queueAcceptanceIntervalMs: 1,
+  });
+  await engine.load(PLAYABLE_TRACK, { currentItemId: "item-current" });
+  player.addMediaItem = function ignoreNativeMutation(item) {
+    this.calls.push(["ignored-add", item.mediaId]);
+  };
+  const successor = {
+    itemId: "item-next",
+    track: { ...PLAYABLE_TRACK, id: "track-next" },
+  };
+
+  await assert.rejects(
+    engine.syncQueue(
+      { track: PLAYABLE_TRACK, itemId: "item-current" },
+      [successor],
+    ),
+    /NATIVE_QUEUE_NOT_READY/,
+  );
+  assert.deepEqual(engine.projection.map((item) => item.itemId), [
+    "item-current",
+  ]);
+  assert.deepEqual(engine.getNativePlaybackSnapshot(), {
+    nativeActiveMediaId: "item-current",
+    nativeActiveIndex: 0,
+    nativeQueueMediaIds: ["item-current"],
+    nativeIsPlaying: false,
+  });
+});
+
+test("Direct and playQueued settle to the same verified native queue shape", async () => {
+  const successors = ["a", "b", "c"].map((id) => ({
+    itemId: `item-${id}`,
+    track: { ...PLAYABLE_TRACK, id: `track-${id}` },
+  }));
+  const directPlayer = createFakeTrackPlayer();
+  const queuedPlayer = createFakeTrackPlayer();
+  const makeEngine = (player) =>
+    new TrackPlayerAudioEngineCore({
+      player,
+      createSource: (track) => ({ uri: `https://auric.test/${track.id}` }),
+    });
+  const direct = makeEngine(directPlayer);
+  const queued = makeEngine(queuedPlayer);
+
+  await direct.load(PLAYABLE_TRACK, { currentItemId: "item-current" });
+  assert.deepEqual(direct.getNativePlaybackSnapshot().nativeQueueMediaIds, [
+    "item-current",
+  ]);
+  await direct.syncQueue(
+    { track: PLAYABLE_TRACK, itemId: "item-current" },
+    successors,
+  );
+  await queued.load(PLAYABLE_TRACK, {
+    currentItemId: "item-current",
+    upcoming: successors,
+  });
+
+  assert.deepEqual(
+    direct.getNativePlaybackSnapshot().nativeQueueMediaIds,
+    queued.getNativePlaybackSnapshot().nativeQueueMediaIds,
+  );
+  assert.deepEqual(direct.getNativePlaybackSnapshot().nativeQueueMediaIds, [
+    "item-current",
+    "item-a",
+    "item-b",
+    "item-c",
+  ]);
+});
+
+test("explicit Next starts its successor when current playback is paused", async () => {
+  const player = createFakeTrackPlayer();
+  const engine = new TrackPlayerAudioEngineCore({
+    player,
+    createSource: (track) => ({ uri: `https://auric.test/${track.id}` }),
+  });
+  await engine.load(PLAYABLE_TRACK, {
+    currentItemId: "item-current",
+    upcoming: [
+      {
+        itemId: "item-next",
+        track: { ...PLAYABLE_TRACK, id: "track-next" },
+      },
+    ],
+  });
+  player.playing = false;
+
+  assert.equal(await engine.next("skipped_next"), true);
+  assert.equal(player.getActiveMediaItem().mediaId, "item-next");
+  assert.equal(player.playing, true);
+  assert.equal(player.calls.at(-1)[0], "play");
+});
+
+test("explicit Next waits for the intended successor to become ready before play", async () => {
+  const player = createFakeTrackPlayer();
+  player.skipToNext = function skipWithoutReady() {
+    this.calls.push(["next"]);
+    this.activeIndex += 1;
+    this.emit(EVENT.MEDIA_ITEM_TRANSITION, {
+      item: this.queue[this.activeIndex],
+      index: this.activeIndex,
+    });
+  };
+  const engine = new TrackPlayerAudioEngineCore({
+    player,
+    createSource: (track) => ({ uri: `https://auric.test/${track.id}` }),
+    explicitPlayTimeoutMs: 100,
+    explicitPlayIntervalMs: 1,
+  });
+  await engine.load(PLAYABLE_TRACK, {
+    currentItemId: "item-current",
+    upcoming: [
+      {
+        itemId: "item-next",
+        track: { ...PLAYABLE_TRACK, id: "track-next" },
+      },
+    ],
+  });
+  const advanced = engine.next("skipped_next");
+  await Promise.resolve();
+  assert.equal(player.calls.filter(([name]) => name === "play").length, 0);
+
+  player.emit(EVENT.PLAYBACK_STATE, { state: "ready" });
+  assert.equal(await advanced, true);
+  assert.equal(player.getActiveMediaItem().mediaId, "item-next");
+  assert.equal(player.playing, true);
+});
+
+test("a late paused-state event cannot overwrite the playing successor", async () => {
+  const player = createFakeTrackPlayer();
+  const engine = new TrackPlayerAudioEngineCore({
+    player,
+    createSource: (track) => ({ uri: `https://auric.test/${track.id}` }),
+  });
+  await engine.load(PLAYABLE_TRACK, {
+    currentItemId: "item-current",
+    upcoming: [
+      {
+        itemId: "item-next",
+        track: { ...PLAYABLE_TRACK, id: "track-next" },
+      },
+    ],
+  });
+  assert.equal(await engine.next("skipped_next"), true);
+  player.emit(EVENT.IS_PLAYING, { playing: false });
+
+  assert.equal(player.playing, true);
+  assert.equal(engine.getStatus().isPlaying, true);
+});
+
+test("cold remote Previous reconciles the active native item before invoking history", async () => {
+  const player = createFakeTrackPlayer();
+  const item = (trackId, itemId) => ({
+    mediaId: itemId,
+    url: { uri: `https://auric.test/${trackId}` },
+    extras: { trackId, itemId, context: { type: "smart_shuffle" } },
+  });
+  player.queue = [
+    item("track-old", "item-old"),
+    item("track-current", "item-current"),
+  ];
+  player.activeIndex = 1;
+  player.progress.position = 6;
+  const engine = new TrackPlayerAudioEngineCore({
+    player,
+    createSource: (track) => ({ uri: `https://auric.test/${track.id}` }),
+  });
+  const order = [];
+  engine.setOnTrackChanged(async (event) => {
+    order.push(["reconciled", event.itemId]);
+  });
+  engine.setOnRemotePrevious(async () => {
+    order.push(["previous", engine.getStatus().positionMs]);
+    return true;
+  });
+
+  assert.equal(
+    await engine.handleNativeEvent({ type: EVENT.REMOTE_PREVIOUS }),
+    true,
+  );
+  assert.deepEqual(order, [
+    ["reconciled", "item-current"],
+    ["previous", 6000],
+  ]);
+});
+
+test("remote Previous awaits the canonical callback through persistence", async () => {
+  const player = createFakeTrackPlayer();
+  const engine = new TrackPlayerAudioEngineCore({
+    player,
+    createSource: (track) => ({ uri: `https://auric.test/${track.id}` }),
+  });
+  await engine.load(PLAYABLE_TRACK, { currentItemId: "item-current" });
+  let releasePersistence;
+  let completed = false;
+  engine.setOnRemotePrevious(async () => {
+    await new Promise((resolve) => {
+      releasePersistence = resolve;
+    });
+    completed = true;
+    return true;
+  });
+
+  const remote = engine.handleNativeEvent({ type: EVENT.REMOTE_PREVIOUS });
+  await Promise.resolve();
+  assert.equal(completed, false);
+  releasePersistence();
+  assert.equal(await remote, true);
+  assert.equal(completed, true);
 });
 
 test("playback policy ignores stale events and advances only for current completion", async () => {

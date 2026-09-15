@@ -56,10 +56,19 @@ function commitAfterActivation({ activate, commit }) {
 }
 
 async function startDirectPlayback({ resetQueue, activate, refill }) {
-  const activated = await activate();
-  if (activated === false) return false;
-  resetQueue();
-  await Promise.resolve(refill()).catch(() => false);
+  // `activate()` performs the optimistic canonical selection synchronously and
+  // then waits for the native item to prepare. Start continuation immediately
+  // after that selection instead of waiting for RNTP Ready: Android may suspend
+  // UI JavaScript while preparation is still pending.
+  const activation = Promise.resolve(activate());
+  const rollback = resetQueue();
+  const continuation = Promise.resolve(refill()).catch(() => false);
+  const activated = await activation;
+  if (activated === false) {
+    rollback?.();
+    return false;
+  }
+  await continuation;
   return activated;
 }
 
@@ -68,6 +77,30 @@ async function takeNextWithEmergency({ takeNext, emergencyRefill }) {
   if (queued) return queued;
   await emergencyRefill();
   return takeNext();
+}
+
+async function runExplicitNext({
+  hasLogicalSuccessor,
+  reconcile,
+  advance,
+  emergencyRefill,
+  pauseAtExhaustion,
+}) {
+  let hasSuccessor = hasLogicalSuccessor();
+  if (hasSuccessor && !(await reconcile())) return false;
+
+  let advanced = hasSuccessor ? await advance() : false;
+  if (!advanced && !hasSuccessor) {
+    await emergencyRefill();
+    hasSuccessor = hasLogicalSuccessor();
+    if (hasSuccessor && (await reconcile())) {
+      advanced = await advance();
+    }
+  }
+  if (advanced) return true;
+  if (hasLogicalSuccessor()) return false;
+  await pauseAtExhaustion();
+  return false;
 }
 
 function createQueueRefillCoordinator({
@@ -208,6 +241,7 @@ module.exports = {
   createQueueRefillCoordinator,
   filterRecommendationBatch,
   moveTrackToFront,
+  runExplicitNext,
   startDirectPlayback,
   takeNextWithEmergency,
 };

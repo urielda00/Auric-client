@@ -5,6 +5,10 @@ import { usePlayerStore } from "../../stores/usePlayerStore";
 
 let backgroundHydration = null;
 
+function isDevelopmentBuild() {
+  return typeof __DEV__ !== "undefined" && __DEV__;
+}
+
 async function ensureBackgroundPlaybackState() {
   if (usePlayerStore.getState().hydrated) return;
   if (!backgroundHydration) {
@@ -26,6 +30,15 @@ async function ensureBackgroundPlaybackState() {
 }
 
 export async function handleBackgroundPlaybackEvent(event) {
+  if (
+    isDevelopmentBuild() &&
+    event?.type === "event.remote-previous"
+  ) {
+    console.debug("[AuricPlaybackRemote]", {
+      remotePreviousReceived: true,
+      backgroundSessionReady: usePlayerStore.getState().hydrated === true,
+    });
+  }
   await ensureBackgroundPlaybackState();
   await audioEngine.handleNativeEvent?.(event);
 }

@@ -164,7 +164,7 @@ test("accepted Queue swipe navigates synchronously without a data prerequisite",
   );
 });
 
-test("Full Player artwork and general background share the broad Queue swipe surface", () => {
+test("Full Player Queue Pan is limited to the lower artwork and Queue handle", () => {
   const routes = [];
   const releaseFromArtwork = createQueueSwipeReleaseHandler(() =>
     routes.push("artwork"),
@@ -181,54 +181,40 @@ test("Full Player artwork and general background share the broad Queue swipe sur
     join(process.cwd(), "src/features/player/FullPlayerScreen.js"),
     "utf8",
   );
+  assert.match(source, /return \(\s*<View style=\{styles\.screen\}>/);
+  assert.doesNotMatch(source, /gesture=\{queueSwipe\}/);
   assert.match(
     source,
-    /return \(\s*<GestureDetector gesture=\{queueSwipe\}>\s*<View style=\{styles\.screen\}>/,
+    /<GestureDetector gesture=\{queueSwipeFromArtwork\}>\s*<View style=\{styles\.artQueueSwipeZone\}/,
   );
-  assert.equal(source.match(/gesture=\{queueSwipe\}/g)?.length, 1);
-  assert.ok(source.indexOf("styles.artZone") > source.indexOf("styles.screen"));
-  assert.ok(source.indexOf("styles.titleRow") > source.indexOf("styles.artZone"));
-  assert.ok(
-    source.indexOf("styles.queuePullZone") > source.indexOf("styles.titleRow"),
+  assert.match(
+    source,
+    /<GestureDetector gesture=\{queueSwipeFromHandle\}>\s*<View style=\{styles\.queuePullZone\}/,
+  );
+  assert.match(
+    source,
+    /artQueueSwipeZone:\s*\{[\s\S]*?bottom: 0,[\s\S]*?height: "50%"/,
   );
 });
 
-test("Full Player controls have gesture priority over the broad Queue swipe", () => {
+test("Full Player controls and SeekBar are outside Queue Pan ownership", () => {
   const source = readFileSync(
     join(process.cwd(), "src/features/player/FullPlayerScreen.js"),
     "utf8",
   );
-  const seekSource = readFileSync(
-    join(process.cwd(), "src/components/SeekBar.js"),
-    "utf8",
-  );
+  assert.doesNotMatch(source, /controlGestures|requireExternalGestureToFail/);
+  assert.match(source, /<SeekBar\s+pct=\{pct\}/);
+  assert.match(source, /accessibilityLabel="Previous"[\s\S]*?onPress=\{transportActions\.left\}/);
+  assert.match(source, /<Pressable onPress=\{toggle\} style=\{styles\.playBtn\}>/);
+  assert.match(source, /accessibilityLabel="Next"[\s\S]*?onPress=\{transportActions\.right\}/);
 
-  assert.match(
-    source,
-    /\.requireExternalGestureToFail\(\s*seekPanGestureRef,\s*seekTapGestureRef,/,
-  );
-  assert.match(source, /panGestureRef=\{seekPanGestureRef\}/);
-  assert.match(source, /tapGestureRef=\{seekTapGestureRef\}/);
-  assert.match(seekSource, /Gesture\.Pan\(\)\s*\.withRef\(panGestureRef\)/);
-  assert.match(seekSource, /Gesture\.Tap\(\)\s*\.withRef\(tapGestureRef\)/);
-  assert.doesNotMatch(
-    seekSource,
-    /Gesture\.Race\([^)]*\)[\s\S]{0,80}\.withRef/,
-  );
-
-  for (const control of [
-    "back",
-    "queueButton",
-    "like",
-    "retry",
-    "previous",
-    "toggle",
-    "next",
-  ]) {
-    assert.match(
-      source,
-      new RegExp(`GestureDetector gesture=\\{controlGestures\\.${control}\\}`),
-    );
+  const titleStart = source.indexOf('<View style={styles.titleRow}>');
+  const progressStart = source.indexOf('<View style={styles.progressZone}>');
+  const transportStart = source.indexOf("styles.transport");
+  for (const region of [titleStart, progressStart, transportStart]) {
+    assert.ok(region >= 0);
+    const nearby = source.slice(region, region + 1400);
+    assert.doesNotMatch(nearby, /queueSwipeFromArtwork/);
   }
 
   const routes = [];
@@ -278,6 +264,30 @@ test("physical transport always binds left to Previous and right to Next", () =>
   actions.left();
   actions.right();
   assert.deepEqual(calls, ["previous", "next"]);
+});
+
+test("Previous transport neither navigates nor keys the Full Player route by track", () => {
+  const playerSource = readFileSync(
+    join(process.cwd(), "src/features/player/FullPlayerScreen.js"),
+    "utf8",
+  );
+  const storeSource = readFileSync(
+    join(process.cwd(), "src/stores/usePlayerStore.js"),
+    "utf8",
+  );
+  const previousStart = storeSource.indexOf("async previous(");
+  const previous = storeSource.slice(
+    previousStart,
+    storeSource.indexOf("async next(", previousStart),
+  );
+
+  assert.match(
+    playerSource,
+    /accessibilityLabel="Previous"[\s\S]*?onPress=\{transportActions\.left\}/,
+  );
+  assert.doesNotMatch(playerSource, /key=\{currentTrackId\}/);
+  assert.doesNotMatch(previous, /router\.|notifyExplicitPlaybackSelection/);
+  assert.doesNotMatch(previous, /currentTrackId:\s*null/);
 });
 
 test("short upward distance or flick opens Queue while tiny/horizontal input does not", () => {

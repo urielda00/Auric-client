@@ -154,6 +154,16 @@ function buildPreviousQueue(current, queueEntries) {
   ];
 }
 
+function selectPreviousAction({
+  positionMs,
+  hasHistory,
+  restartThresholdMs = 4000,
+}) {
+  return Number(positionMs) > restartThresholdMs || !hasHistory
+    ? "restart-current"
+    : "previous-track";
+}
+
 module.exports = {
   NATIVE_SUCCESSOR_COUNT,
   appendAdvancedHistory,
@@ -164,5 +174,6 @@ module.exports = {
   createIdempotentTransitionTracker,
   createTransitionGate,
   projectionIds,
+  selectPreviousAction,
   sameProjection,
 };

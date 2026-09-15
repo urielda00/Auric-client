@@ -267,6 +267,78 @@ test("background persistence reconciles known local successors before flushing s
   assert.doesNotMatch(source.slice(0, source.indexOf("async function activate")), /QueueScreen/);
 });
 
+test("successful activation always verifies the latest native projection", () => {
+  const source = readFileSync(
+    join(process.cwd(), "src/stores/usePlayerStore.js"),
+    "utf8",
+  );
+  const commitStart = source.indexOf(
+    "const committed = activations.commitAndTakeProjectionRequest",
+  );
+  const activationCommit = source.slice(
+    commitStart,
+    source.indexOf("listeningTracker.handleStatus", commitStart),
+  );
+  assert.match(activationCommit, /if \(!committed\.committed\) return false;/);
+  assert.match(activationCommit, /await syncNativeProjection\(get\);/);
+  assert.doesNotMatch(activationCommit, /if \(committed\.projectionRequested\)/);
+});
+
+test("Remote Previous delegates to the same live-position semantics as foreground", () => {
+  const source = readFileSync(
+    join(process.cwd(), "src/stores/usePlayerStore.js"),
+    "utf8",
+  );
+  assert.match(
+    source,
+    /setOnRemotePrevious\?\.\(\(\) =>[\s\S]*get\(\)\.previous\(\{/,
+  );
+  const previousStart = source.indexOf("async previous(");
+  const previous = source.slice(
+    previousStart,
+    source.indexOf("async next(", previousStart),
+  );
+  assert.match(previous, /const nativeStatus = audioEngine\.getStatus\(\)/);
+  assert.match(previous, /selectPreviousAction\(\{/);
+  assert.match(previous, /hasHistory: playedStack\.length > 0/);
+  assert.match(previous, /await get\(\)\.seek\(0\)/);
+  assert.match(previous, /playedStack: playedStack\.slice\(0, -1\)/);
+  assert.match(previous, /playedItems: playedItems\.slice\(0, -1\)/);
+  assert.doesNotMatch(previous, /preferHistory/);
+  assert.doesNotMatch(previous, /currentTrackId:\s*null/);
+  assert.doesNotMatch(previous, /notifyExplicitPlaybackSelection/);
+});
+
+test("DEV playback snapshots cover direct refill, projection, and queued activation", () => {
+  const source = readFileSync(
+    join(process.cwd(), "src/stores/usePlayerStore.js"),
+    "utf8",
+  );
+  const engine = readFileSync(
+    join(
+      process.cwd(),
+      "src/services/audio/TrackPlayerAudioEngineCore.cjs",
+    ),
+    "utf8",
+  );
+  for (const reason of [
+    "direct activation committed",
+    "direct refill completed",
+    "post-refill projection completed",
+    "post-refill projection settled",
+    "playQueued activation committed",
+  ]) {
+    assert.match(source, new RegExp(reason));
+  }
+  assert.match(source, /typeof __DEV__ !== "undefined" && __DEV__/);
+  assert.match(source, /logicalCurrentItemId/);
+  assert.match(source, /logicalUpcomingItemIds/);
+  assert.match(engine, /this\.player\.getQueue\?\.\(\)/);
+  assert.match(engine, /this\.player\.getActiveMediaItem\?\.\(\)/);
+  assert.match(engine, /this\.player\.getActiveMediaItemIndex\?\.\(\)/);
+  assert.match(source, /nativeIsPlaying/);
+});
+
 test("tap A, then B before A is ready commits only B", () => {
   const harness = activationHarness();
   const a = harness.begin("A");
@@ -610,6 +682,61 @@ test("mock mode remains local and never requires an API", async () => {
   assert.equal((await coordinator.hydrate()).source, "local");
   await coordinator.replace(localSnapshot({ positionMs: 5555 }));
   assert.equal(storage.value().positionMs, 5555);
+});
+
+test("background history persistence is durable before replace resolves", async () => {
+  let releaseSave;
+  let saved = false;
+  const coordinator = createPlaybackSyncCoordinator({
+    api: null,
+    enabled: false,
+    storage: {
+      load: async () => null,
+      save: async () => {
+        await new Promise((resolve) => {
+          releaseSave = resolve;
+        });
+        saved = true;
+      },
+    },
+  });
+  const replacement = coordinator.replace(
+    localSnapshot({
+      played: [{ id: ITEM_ID, trackId: SECOND_DTO.id, context: CONTEXT }],
+    }),
+  );
+  let settled = false;
+  void replacement.then(() => {
+    settled = true;
+  });
+  await Promise.resolve();
+  assert.equal(settled, false);
+  assert.equal(saved, false);
+
+  releaseSave();
+  await replacement;
+  assert.equal(saved, true);
+  assert.equal(settled, true);
+});
+
+test("background playback session hydrates played history before dispatch", () => {
+  const source = readFileSync(
+    join(process.cwd(), "src/services/audio/playbackSession.js"),
+    "utf8",
+  );
+  const handler = source.slice(source.indexOf("async function ensureBackgroundPlaybackState"));
+  assert.ok(
+    handler.indexOf("useLibraryStore.getState().hydrate()") <
+      handler.indexOf("useQueueStore.getState().hydrate()"),
+  );
+  assert.ok(
+    handler.indexOf("useQueueStore.getState().hydrate()") <
+      handler.indexOf("await usePlayerStore.getState().hydrate"),
+  );
+  assert.ok(
+    handler.indexOf("await ensureBackgroundPlaybackState()") <
+      handler.indexOf("await audioEngine.handleNativeEvent?.(event)"),
+  );
 });
 
 test("restores current, queue, played stack, and saved position paused", async () => {

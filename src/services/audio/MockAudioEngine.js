@@ -113,7 +113,7 @@ export class MockAudioEngine extends AudioEngine {
       reason,
       generation: this.generation,
     });
-    this._emitStatus();
+    this.play();
     return Promise.resolve(true);
   }
 
@@ -154,6 +154,17 @@ export class MockAudioEngine extends AudioEngine {
       trackId: this.trackId,
       itemId: this.itemId,
       generation: this.generation,
+    };
+  }
+
+  getNativePlaybackSnapshot() {
+    return {
+      nativeActiveMediaId: this.itemId || null,
+      nativeActiveIndex: this.itemId ? 0 : null,
+      nativeQueueMediaIds: this.projection
+        .map((item) => item.itemId || item.id)
+        .filter(Boolean),
+      nativeIsPlaying: this.isPlaying,
     };
   }
 

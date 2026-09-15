@@ -122,18 +122,19 @@ function createPlaybackSyncCoordinator({ api, storage, enabled }) {
     replace(snapshot) {
       const operationGeneration = ++generation;
       const local = { ...stripTracks(snapshot), revision };
-      void save(local);
-      if (!enabled) return Promise.resolve(local);
-      return queueWrite(operationGeneration, (expectedRevision) =>
+      const localWrite = save(local);
+      if (!enabled) return localWrite.then(() => local);
+      const remoteWrite = queueWrite(operationGeneration, (expectedRevision) =>
         api.replace(local, expectedRevision),
       );
+      return Promise.all([localWrite, remoteWrite]).then(([, remote]) => remote);
     },
     checkpoint(snapshot) {
       const operationGeneration = ++generation;
       const local = { ...stripTracks(snapshot), revision };
-      void save(local);
-      if (!enabled || !local.current) return Promise.resolve(local);
-      return queueWrite(operationGeneration, (expectedRevision) =>
+      const localWrite = save(local);
+      if (!enabled || !local.current) return localWrite.then(() => local);
+      const remoteWrite = queueWrite(operationGeneration, (expectedRevision) =>
         api.checkpoint(
           {
             currentTrackId: local.current.trackId,
@@ -142,6 +143,7 @@ function createPlaybackSyncCoordinator({ api, storage, enabled }) {
           expectedRevision,
         ),
       );
+      return Promise.all([localWrite, remoteWrite]).then(([, remote]) => remote);
     },
     async flush() {
       try {
