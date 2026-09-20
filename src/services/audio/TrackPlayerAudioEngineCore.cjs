@@ -1,5 +1,5 @@
 const {
-  NATIVE_SUCCESSOR_COUNT,
+  NATIVE_PRELOAD_COUNT,
   buildNativeProjection,
   classifyPlaybackError,
   sameProjection,
@@ -121,7 +121,7 @@ class TrackPlayerAudioEngineCore {
       audioMixing: "exclusive",
       cache: {
         maxSizeBytes: 256 * 1024 * 1024,
-        preloading: { window: NATIVE_SUCCESSOR_COUNT },
+        preloading: { window: NATIVE_PRELOAD_COUNT },
       },
       progressSync: { intervalSeconds: 1 },
       android: {
@@ -539,6 +539,7 @@ class TrackPlayerAudioEngineCore {
       this.player.setMediaItems(items, 0);
       const queueIds = this.player.getQueue().map((item) => item.mediaId);
       if (
+        this.player.getActiveMediaItemIndex?.() === 0 &&
         queueIds.length === expectedIds.length &&
         queueIds.every((id, index) => id === expectedIds[index])
       ) {
@@ -558,7 +559,13 @@ class TrackPlayerAudioEngineCore {
     generation,
   ) {
     const expectedIds = nextItems.map((item) => item.mediaId);
-    const deadline = this.now() + this.queueAcceptanceTimeoutMs;
+    const maxObservedChanges = Math.max(
+      16,
+      4 * (expectedIds.length + this.player.getQueue().length + 1),
+    );
+    let observedChanges = 0;
+    let lastObservedQueue = null;
+    let stallDeadline = this.now() + this.queueAcceptanceTimeoutMs;
     let mutated = false;
     do {
       if (generation !== this.generation) {
@@ -586,6 +593,15 @@ class TrackPlayerAudioEngineCore {
 
       const queue = this.player.getQueue();
       const queueIds = queue.map((item) => item.mediaId);
+      const observedQueue = `${activeIndex}:${queueIds.join(">")}`;
+      if (observedQueue !== lastObservedQueue) {
+        lastObservedQueue = observedQueue;
+        observedChanges += 1;
+        if (observedChanges > maxObservedChanges) {
+          throw new Error("NATIVE_QUEUE_NOT_READY");
+        }
+        stallDeadline = this.now() + this.queueAcceptanceTimeoutMs;
+      }
       if (
         activeIndex === 0 &&
         queueIds.length === expectedIds.length &&
@@ -624,7 +640,7 @@ class TrackPlayerAudioEngineCore {
       await new Promise((resolve) =>
         setTimeout(resolve, this.queueAcceptanceIntervalMs),
       );
-    } while (this.now() < deadline);
+    } while (this.now() < stallDeadline);
     throw new Error("NATIVE_QUEUE_NOT_READY");
   }
 

@@ -29,7 +29,7 @@ export default function HomeScreen() {
   const [stats, setStats] = useState(null);
   const requestGate = useRef(createLatestRequestGate());
   const activeRequest = useRef(null);
-  const play = usePlayerStore((state) => state.play);
+  const playTrackFromContext = usePlayerStore((state) => state.playTrackFromContext);
   const likedIds = useLibraryStore((state) => state.likedIds);
   const toggleLike = useLibraryStore((state) => state.toggleLike);
   const tracksHydrated = useLibraryStore((state) => state.hydrated);
@@ -116,8 +116,12 @@ export default function HomeScreen() {
   }, [seed, loadPicks]);
 
   const handlePlay = useCallback(
-    (track) => play(track.id, { type: "quick_pick", label: "Quick Picks" }),
-    [play],
+    (track) => playTrackFromContext(
+      track.id,
+      [...(picks?.cards || []), ...(picks?.rows || [])].map((item) => item.track),
+      { type: "quick_pick", label: "Quick Picks" },
+    ),
+    [playTrackFromContext, picks],
   );
   const bottomInset = useTabBarBottomInset();
 

@@ -1,11 +1,11 @@
-const NATIVE_SUCCESSOR_COUNT = 3;
+const NATIVE_PRELOAD_COUNT = 3;
 
 function buildNativeProjection({
   current,
   upcoming = [],
   getTrack,
   isPlayable,
-  successorCount = NATIVE_SUCCESSOR_COUNT,
+  successorCount = Number.MAX_SAFE_INTEGER,
 }) {
   if (!current?.track || !isPlayable(current.track)) return [];
   const projection = [{ ...current, isCurrent: true }];
@@ -147,10 +147,10 @@ function appendAdvancedHistory({
 }
 
 function buildPreviousQueue(current, queueEntries) {
-  if (!current?.trackId) return queueEntries;
+  if (!current?.id) return queueEntries;
   return [
     current,
-    ...queueEntries.filter((item) => item.trackId !== current.trackId),
+    ...queueEntries.filter((item) => item.id !== current.id),
   ];
 }
 
@@ -165,7 +165,7 @@ function selectPreviousAction({
 }
 
 module.exports = {
-  NATIVE_SUCCESSOR_COUNT,
+  NATIVE_PRELOAD_COUNT,
   appendAdvancedHistory,
   buildPreviousQueue,
   buildNativeProjection,

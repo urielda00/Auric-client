@@ -46,6 +46,22 @@ function filterRecommendationBatch(tracks, excludedIds, capacity, isPlayable) {
   return result;
 }
 
+function buildContextSelection(trackId, trackIds, isPlayable, index) {
+  const ids = (Array.isArray(trackIds) ? trackIds : []).map((item) =>
+    typeof item === "string" ? item : item?.id || item?.trackId,
+  );
+  const selectedIndex = Number.isInteger(index) ? index : ids.indexOf(trackId);
+  if (
+    selectedIndex < 0 ||
+    ids[selectedIndex] !== trackId ||
+    !isPlayable(trackId)
+  ) return null;
+  return {
+    previous: ids.slice(0, selectedIndex).filter(isPlayable),
+    upcoming: ids.slice(selectedIndex + 1).filter(isPlayable),
+  };
+}
+
 function commitAfterActivation({ activate, commit }) {
   return Promise.resolve(activate()).then((activated) => {
     if (activated !== false) {
@@ -53,23 +69,6 @@ function commitAfterActivation({ activate, commit }) {
     }
     return activated;
   });
-}
-
-async function startDirectPlayback({ resetQueue, activate, refill }) {
-  // `activate()` performs the optimistic canonical selection synchronously and
-  // then waits for the native item to prepare. Start continuation immediately
-  // after that selection instead of waiting for RNTP Ready: Android may suspend
-  // UI JavaScript while preparation is still pending.
-  const activation = Promise.resolve(activate());
-  const rollback = resetQueue();
-  const continuation = Promise.resolve(refill()).catch(() => false);
-  const activated = await activation;
-  if (activated === false) {
-    rollback?.();
-    return false;
-  }
-  await continuation;
-  return activated;
 }
 
 async function takeNextWithEmergency({ takeNext, emergencyRefill }) {
@@ -85,19 +84,25 @@ async function runExplicitNext({
   advance,
   emergencyRefill,
   pauseAtExhaustion,
+  isCurrent = () => true,
 }) {
+  if (!isCurrent()) return false;
   let hasSuccessor = hasLogicalSuccessor();
   if (hasSuccessor && !(await reconcile())) return false;
+  if (!isCurrent()) return false;
 
   let advanced = hasSuccessor ? await advance() : false;
   if (!advanced && !hasSuccessor) {
     await emergencyRefill();
+    if (!isCurrent()) return false;
     hasSuccessor = hasLogicalSuccessor();
     if (hasSuccessor && (await reconcile())) {
+      if (!isCurrent()) return false;
       advanced = await advance();
     }
   }
   if (advanced) return true;
+  if (!isCurrent()) return false;
   if (hasLogicalSuccessor()) return false;
   await pauseAtExhaustion();
   return false;
@@ -188,8 +193,11 @@ function createQueueRefillCoordinator({
         inFlight = null;
         if (rerunRequested) {
           rerunRequested = false;
+          const rerunGeneration = generation;
           const rerun = Promise.resolve()
-            .then(() => performRefill())
+            .then(() =>
+              rerunGeneration === generation ? performRefill() : false,
+            )
             .catch(() => false)
             .finally(() => {
               if (queuedRerun === rerun) queuedRerun = null;
@@ -237,11 +245,11 @@ module.exports = {
   DEFAULT_REFILL_THRESHOLD,
   appendUniqueEntries,
   buildRefillExclusions,
+  buildContextSelection,
   commitAfterActivation,
   createQueueRefillCoordinator,
   filterRecommendationBatch,
   moveTrackToFront,
   runExplicitNext,
-  startDirectPlayback,
   takeNextWithEmergency,
 };

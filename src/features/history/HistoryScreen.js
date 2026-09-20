@@ -24,7 +24,7 @@ export default function HistoryScreen() {
   const historyNextCursor = useLibraryStore((s) => s.historyNextCursor);
   const refreshHistory = useLibraryStore((s) => s.refreshHistory);
   const loadMoreHistory = useLibraryStore((s) => s.loadMoreHistory);
-  const play = usePlayerStore((s) => s.play);
+  const playTrackFromContext = usePlayerStore((s) => s.playTrackFromContext);
   const enqueueNext = useQueueStore((s) => s.enqueueNext);
 
   useEffect(() => {
@@ -40,6 +40,11 @@ export default function HistoryScreen() {
       }))
       .filter((g) => g.items.length);
   }, [history, tracksById]);
+  const historyItems = useMemo(
+    () => groups.flatMap((group) => group.items),
+    [groups],
+  );
+  const historyTracks = useMemo(() => historyItems.map((item) => item.track), [historyItems]);
 
   const [miniPlayerHeight, onMiniPlayerLayout] = useMeasuredHeight();
   const bottomInset = useMiniPlayerBottomInset(miniPlayerHeight);
@@ -73,7 +78,12 @@ export default function HistoryScreen() {
                   liked={likedIds.includes(entry.trackId)}
                   unavailable={entry.track.hasMedia === false}
                   showNextPill
-                  onPress={() => play(entry.trackId, { type: 'history', label: 'History' })}
+                  onPress={() => playTrackFromContext(
+                    entry.trackId,
+                    historyTracks,
+                    { type: 'history', label: 'History' },
+                    historyItems.findIndex((item) => item.entryId === entry.entryId),
+                  )}
                   onPlayNext={() => enqueueNext(entry.trackId)}
                   onToggleLike={() => toggleLike(entry.trackId)}
                 />

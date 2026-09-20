@@ -235,7 +235,7 @@ const PlayedRow = memo(function PlayedRow({ item }) {
           {joinArtists(item.track.artists)}
         </Text>
       </View>
-      <Text style={styles.playedLabel}>PLAYED</Text>
+      <Text style={styles.playedLabel}>PREVIOUS</Text>
     </View>
   );
 });

@@ -22,13 +22,17 @@ function createLatestActivationCoordinator() {
       return { committed: false, projectionRequested: false };
     }
     const shouldProject = projectionRequested;
+    const nextRequested = token.nextRequested === true;
     pending = null;
     committedBaseline = null;
     projectionRequested = false;
-    return { committed: true, projectionRequested: shouldProject };
+    return { committed: true, projectionRequested: shouldProject, nextRequested };
   }
 
   return {
+    baselineOr(captureBaseline) {
+      return committedBaseline === null ? captureBaseline() : committedBaseline;
+    },
     begin(captureBaseline) {
       if (committedBaseline === null) {
         committedBaseline = captureBaseline();
@@ -36,6 +40,7 @@ function createLatestActivationCoordinator() {
       const token = {
         sequence: ++sequence,
         generation: null,
+        nextRequested: false,
       };
       pending = token;
       return { token, baseline: committedBaseline };
@@ -60,6 +65,11 @@ function createLatestActivationCoordinator() {
 
     hasUncommittedSelection() {
       return committedBaseline !== null;
+    },
+    deferNext() {
+      if (!pending) return false;
+      pending.nextRequested = true;
+      return true;
     },
 
     requestProjection() {

@@ -34,7 +34,7 @@ const {
   takeNextPlayable,
 } = require("../src/services/audio/playbackPolicy.cjs");
 const {
-  startDirectPlayback,
+  buildContextSelection,
 } = require("../src/services/playbackQueuePolicy.cjs");
 
 const DTO = {
@@ -419,48 +419,38 @@ test("Track Player adapter configures native queue, media controls, and real sta
   });
 });
 
-test("Quick Play projects successors without QueueScreen or activation readiness", async () => {
+test("context playback installs native successors before playback or background controls", async () => {
   const player = createFakeTrackPlayer();
   const engine = new TrackPlayerAudioEngineCore({
     player,
     createSource: (track) => ({ uri: `https://auric.test/${track.id}` }),
   });
-  const successors = ["a", "b", "c"].map((id) => ({
-    itemId: `item-${id}`,
-    track: { ...PLAYABLE_TRACK, id: `track-${id}` },
-  }));
-  let finishActivation;
-  const nativeReady = new Promise((resolve) => {
-    finishActivation = resolve;
+  const ids = ["a", "b", "c", "d", "e", "f"];
+  const selection = buildContextSelection("b", ids, () => true);
+  await engine.load({ ...PLAYABLE_TRACK, id: "b" }, {
+    currentItemId: "item-b",
+    upcoming: selection.upcoming.map((id) => ({
+      itemId: `item-${id}`,
+      track: { ...PLAYABLE_TRACK, id },
+    })),
   });
+  assert.deepEqual(selection.previous, ["a"]);
+  assert.deepEqual(player.queue.map((item) => item.mediaId), [
+    "item-b", "item-c", "item-d", "item-e", "item-f",
+  ]);
+  assert.equal(player.calls.some(([name]) => name === "play"), false);
+  engine.setOnRemoteNext(() => engine.next());
+  engine.play();
+  await engine.handleNativeEvent({ type: EVENT.REMOTE_NEXT });
+  assert.equal(player.getActiveMediaItem().mediaId, "item-c");
+  assert.equal(player.isPlaying(), true);
 
-  const direct = startDirectPlayback({
-    activate: async () => {
-      await engine.load(PLAYABLE_TRACK, { currentItemId: "item-current" });
-      await nativeReady;
-      return true;
-    },
-    resetQueue: () => {},
-    refill: () =>
-      engine.syncQueue(
-        { track: PLAYABLE_TRACK, itemId: "item-current" },
-        successors,
-      ),
+  await engine.load({ ...PLAYABLE_TRACK, id: "other" }, {
+    currentItemId: "item-other",
+    upcoming: [],
   });
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  assert.deepEqual(player.queue.map((item) => item.mediaId), [
-    "item-current",
-    "item-a",
-  ]);
-
-  finishActivation();
-  assert.equal(await direct, true);
-  assert.deepEqual(player.queue.map((item) => item.mediaId), [
-    "item-current",
-    "item-a",
-    "item-b",
-    "item-c",
-  ]);
+  assert.deepEqual(player.queue.map((item) => item.mediaId), ["item-other"]);
+  assert.equal(player.getActiveMediaItem().mediaId, "item-other");
 });
 
 test("Track Player adapter rejects metadata-only tracks at the playback boundary", async () => {
@@ -839,6 +829,70 @@ test("successor projection refresh patches the native tail without interrupting 
     player.calls.filter(([name]) => name === "set-items").length,
     setCalls,
   );
+});
+
+test("large native reorder converges without changing the active item", async () => {
+  const player = createFakeTrackPlayer();
+  let nowMs = 0;
+  const engine = new TrackPlayerAudioEngineCore({
+    player,
+    createSource: (track) => ({ uri: `https://auric.test/${track.id}` }),
+    queueAcceptanceIntervalMs: 0,
+    now: () => { nowMs += 30; return nowMs; },
+  });
+  const spec = (id) => ({
+    id: `item-${id}`,
+    itemId: `item-${id}`,
+    track: { ...PLAYABLE_TRACK, id: `track-${id}` },
+  });
+  const original = Array.from({ length: 120 }, (_, index) => spec(index));
+  await engine.load(PLAYABLE_TRACK, {
+    currentItemId: "item-current",
+    upcoming: original,
+  });
+  const desired = [...original].reverse();
+  assert.equal(
+    await engine.syncQueue(
+      { track: PLAYABLE_TRACK, itemId: "item-current" },
+      desired,
+    ),
+    true,
+  );
+  assert.equal(player.getActiveMediaItem().mediaId, "item-current");
+  assert.deepEqual(player.queue.map((item) => item.mediaId), [
+    "item-current",
+    ...desired.map((item) => item.itemId),
+  ]);
+});
+
+test("large native deletion converges to the exact logical queue", async () => {
+  const player = createFakeTrackPlayer();
+  const engine = new TrackPlayerAudioEngineCore({
+    player,
+    createSource: (track) => ({ uri: `https://auric.test/${track.id}` }),
+    queueAcceptanceIntervalMs: 0,
+  });
+  const spec = (id) => ({
+    id: `item-${id}`,
+    itemId: `item-${id}`,
+    track: { ...PLAYABLE_TRACK, id: `track-${id}` },
+  });
+  const original = Array.from({ length: 150 }, (_, index) => spec(index));
+  await engine.load(PLAYABLE_TRACK, {
+    currentItemId: "item-current",
+    upcoming: original,
+  });
+  const desired = [original[0], original[149]];
+  await engine.syncQueue(
+    { track: PLAYABLE_TRACK, itemId: "item-current" },
+    desired,
+  );
+  assert.deepEqual(player.queue.map((item) => item.mediaId), [
+    "item-current",
+    "item-0",
+    "item-149",
+  ]);
+  assert.equal(player.getActiveMediaItem().mediaId, "item-current");
 });
 
 test("repeating the same successor projection performs no duplicate native mutation", async () => {

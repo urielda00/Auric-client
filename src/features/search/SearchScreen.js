@@ -24,7 +24,7 @@ export default function SearchScreen() {
   const [status, setStatus] = useState('idle');
   const [error, setError] = useState(null);
   const [retryVersion, setRetryVersion] = useState(0);
-  const play = usePlayerStore((state) => state.play);
+  const playTrackFromContext = usePlayerStore((state) => state.playTrackFromContext);
   const enqueueNext = useQueueStore((state) => state.enqueueNext);
   const likedIds = useLibraryStore((state) => state.likedIds);
   const toggleLike = useLibraryStore((state) => state.toggleLike);
@@ -70,10 +70,10 @@ export default function SearchScreen() {
   const handlePlay = useCallback(
     (track) => {
       if (track.hasMedia === false) return;
-      play(track.id, { type: 'search', label: 'Search' });
+      playTrackFromContext(track.id, results, { type: 'search', label: 'Search' });
       searchService.addRecentSearch(query).then(setRecents);
     },
-    [play, query],
+    [playTrackFromContext, query, results],
   );
 
   const isIdle = !query.trim();

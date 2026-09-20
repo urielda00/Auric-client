@@ -1,14 +1,17 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
+const {
+  createRecommendationRequestCoordinator,
+} = require("../src/services/recommendationApi.cjs");
 
 const {
   DEFAULT_QUEUE_TARGET,
+  buildContextSelection,
   appendUniqueEntries,
   commitAfterActivation,
   createQueueRefillCoordinator,
   moveTrackToFront,
   runExplicitNext,
-  startDirectPlayback,
   takeNextWithEmergency,
 } = require("../src/services/playbackQueuePolicy.cjs");
 
@@ -74,8 +77,25 @@ test("explicit Next pauses only after a truly exhausted refill", async () => {
   assert.equal(advanced, false);
   assert.deepEqual(order, ["refill", "pause"]);
 });
+
+test("Next does not advance a replacement context after reconciliation", async () => {
+  let currentItemId = "item-a";
+  let advances = 0;
+  const result = await runExplicitNext({
+    isCurrent: () => currentItemId === "item-a",
+    hasLogicalSuccessor: () => true,
+    reconcile: async () => {
+      currentItemId = "item-b";
+      return true;
+    },
+    advance: async () => { advances += 1; return true; },
+    emergencyRefill: async () => {},
+    pauseAtExhaustion: async () => {},
+  });
+  assert.equal(result, false);
+  assert.equal(advances, 0);
+});
 const {
-  NATIVE_SUCCESSOR_COUNT,
   appendAdvancedHistory,
   buildNativeProjection,
   buildPreviousQueue,
@@ -98,6 +118,33 @@ const entry = (trackId, context = { type: "smart_shuffle", label: "Smart Shuffle
   context,
 });
 const isPlayable = (track) => track?.hasMedia === true;
+
+test("context selection keeps list order for first, middle, last, and a single track", () => {
+  const available = () => true;
+  assert.deepEqual(buildContextSelection("a", ["a", "b", "c"], available), {
+    previous: [], upcoming: ["b", "c"],
+  });
+  assert.deepEqual(buildContextSelection("b", ["a", "b", "c"], available), {
+    previous: ["a"], upcoming: ["c"],
+  });
+  assert.deepEqual(buildContextSelection("c", ["a", "b", "c"], available), {
+    previous: ["a", "b"], upcoming: [],
+  });
+  assert.deepEqual(buildContextSelection("only", ["only"], available), {
+    previous: [], upcoming: [],
+  });
+});
+
+test("context selection filters unavailable songs and distinguishes repeated history rows", () => {
+  const available = (id) => id !== "missing";
+  assert.deepEqual(buildContextSelection("a", ["a", "missing", "b", "a", "c"], available, 3), {
+    previous: ["a", "b"], upcoming: ["c"],
+  });
+  assert.equal(buildContextSelection("a", ["b", "a"], available, 0), null);
+  assert.deepEqual(buildContextSelection("other", ["other", "later"], available), {
+    previous: [], upcoming: ["later"],
+  });
+});
 
 function coordinatorFixture({
   queueIds = [],
@@ -184,53 +231,6 @@ test("long press invokes track actions without also invoking normal playback", (
   assert.equal(calls.at(-1), "play");
 });
 
-test("direct play starts automatic continuation before native activation is ready", async () => {
-  const order = [];
-  let resolveActivation;
-  let resolveRefill;
-  const activation = new Promise((resolve) => {
-    resolveActivation = resolve;
-  });
-  const refill = new Promise((resolve) => {
-    resolveRefill = resolve;
-  });
-  const directPlay = startDirectPlayback({
-    resetQueue: () => order.push("reset"),
-    activate: () => {
-      order.push("activate");
-      return activation;
-    },
-    refill: () => {
-      order.push("refill");
-      return refill;
-    },
-  });
-  let settled = false;
-  void directPlay.then(() => {
-    settled = true;
-  });
-  await Promise.resolve();
-  assert.deepEqual(order, ["activate", "reset", "refill"]);
-  assert.equal(settled, false);
-  resolveActivation(true);
-  await Promise.resolve();
-  assert.equal(settled, false);
-  resolveRefill(true);
-  assert.equal(await directPlay, true);
-
-  const preserved = ["keep"];
-  const failed = await startDirectPlayback({
-    resetQueue: () => {
-      const previous = preserved.splice(0);
-      return () => preserved.push(...previous);
-    },
-    activate: async () => false,
-    refill: async () => {},
-  });
-  assert.equal(failed, false);
-  assert.deepEqual(preserved, ["keep"]);
-});
-
 test("failed queued activation preserves the logical item until commit", async () => {
   const queue = [entry("queued")];
   const result = await commitAfterActivation({
@@ -241,7 +241,7 @@ test("failed queued activation preserves the logical item until commit", async (
   assert.deepEqual(queue.map((item) => item.trackId), ["queued"]);
 });
 
-test("native projection is current plus three playable successors and stays bounded", () => {
+test("native projection contains the full playable upcoming context", () => {
   const logical = [
     entry("one"),
     entry("missing"),
@@ -263,10 +263,10 @@ test("native projection is current plus three playable successors and stays boun
     getTrack: (id) => tracks[id],
     isPlayable,
   });
-  assert.equal(projection.length, NATIVE_SUCCESSOR_COUNT + 1);
+  assert.equal(projection.length, 5);
   assert.deepEqual(
     projection.map((item) => item.track.id),
-    ["current", "one", "two", "three"],
+    ["current", "one", "two", "three", "four"],
   );
   assert.deepEqual(logical, before);
 });
@@ -396,15 +396,27 @@ test("background transition synchronization is idempotent", () => {
   assert.equal(tracker.accept("next->later"), true);
 });
 
-test("Previous stages the current item first without duplicating played history", () => {
+test("Previous keeps a later occurrence of the current song", () => {
   const current = {
     id: "current-item",
     trackId: "current",
     context: { type: "search", label: "Search" },
   };
   const result = buildPreviousQueue(current, [entry("later"), entry("current")]);
-  assert.deepEqual(result.map((item) => item.trackId), ["current", "later"]);
+  assert.deepEqual(result.map((item) => item.trackId), ["current", "later", "current"]);
   assert.equal(result[0].id, "current-item");
+  assert.equal(result[2].id, "item-current");
+});
+
+test("Previous across repeated songs preserves each distinct queue item", () => {
+  const firstA = { id: "first-a", trackId: "a" };
+  const b = { id: "b", trackId: "b" };
+  const secondA = { id: "second-a", trackId: "a" };
+  const thirdA = { id: "third-a", trackId: "a" };
+  const fromSecondA = buildPreviousQueue(secondA, [thirdA]);
+  const fromB = buildPreviousQueue(b, fromSecondA);
+  assert.deepEqual(fromB.map((item) => item.id), ["b", "second-a", "third-a"]);
+  assert.equal(firstA.id, "first-a");
 });
 
 test("A to B to C history pops back through B and then A exactly once", () => {
@@ -478,6 +490,28 @@ test("concurrent refill triggers share one network request", async () => {
   resolveRequest([playable("recommended")]);
   await Promise.all([first, second]);
   assert.equal(fixture.state.smartCalls.length, 1);
+});
+
+test("queued-track selection invalidates a pending Smart Shuffle result", async () => {
+  const requests = createRecommendationRequestCoordinator();
+  const token = requests.begin("smart");
+  let selected = "queued-track";
+  requests.invalidate();
+  await Promise.resolve();
+  if (requests.isCurrent(token)) selected = "stale-recommendation";
+  assert.equal(selected, "queued-track");
+});
+
+test("context switch prevents an old refill from appending", async () => {
+  let resolveOld;
+  const pending = new Promise((resolve) => { resolveOld = resolve; });
+  const fixture = coordinatorFixture({ smartResult: () => pending });
+  const oldRefill = fixture.coordinator.refill();
+  fixture.state.entries = [entry("new-context")];
+  fixture.coordinator.invalidate();
+  resolveOld([playable("old-context")]);
+  assert.equal(await oldRefill, false);
+  assert.deepEqual(fixture.state.entries.map((item) => item.trackId), ["new-context"]);
 });
 
 test("background wait joins an existing refill without starting a request", async () => {

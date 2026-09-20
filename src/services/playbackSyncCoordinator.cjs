@@ -21,18 +21,27 @@ function createPlaybackSyncCoordinator({ api, storage, enabled }) {
   let revision = 0;
   let generation = 0;
   let chain = Promise.resolve();
+  let localChain = null;
   let conflictHandler = null;
 
-  const save = async (snapshot) => {
-    await storage.save(stripTracks(snapshot));
+  const save = (snapshot) => {
+    const local = stripTracks(snapshot);
+    const write = localChain
+      ? localChain.catch(() => undefined).then(() => storage.save(local))
+      : Promise.resolve(storage.save(local));
+    const tracked = write.finally(() => {
+      if (localChain === tracked) localChain = null;
+    });
+    localChain = tracked;
+    return tracked;
   };
 
   const reconcileConflict = async (operationGeneration) => {
     const remote = await api.get();
-    revision = remote.revision;
     if (operationGeneration === generation) {
+      revision = remote.revision;
       await save(remote);
-      await conflictHandler?.(remote);
+      if (operationGeneration === generation) await conflictHandler?.(remote);
     }
     return remote;
   };
@@ -90,9 +99,15 @@ function createPlaybackSyncCoordinator({ api, storage, enabled }) {
           return { snapshot: local, source: "local-stale-hydration" };
         }
         await save(seeded);
+        if (startedAtGeneration !== generation) {
+          return { snapshot: local, source: "local-stale-hydration" };
+        }
         return { snapshot: seeded, source: "local-bootstrap" };
       }
       await save(remote);
+      if (startedAtGeneration !== generation) {
+        return { snapshot: local, source: "local-stale-hydration" };
+      }
       return { snapshot: remote, source: "server" };
     } catch {
       return { snapshot: local, source: "offline" };
@@ -106,12 +121,21 @@ function createPlaybackSyncCoordinator({ api, storage, enabled }) {
     get revision() {
       return revision;
     },
+    isGenerationCurrent(value) {
+      return value === generation;
+    },
     setConflictHandler(handler) {
       conflictHandler = handler;
     },
     markLocalChange() {
       generation += 1;
       return generation;
+    },
+    async stageLocal(snapshot) {
+      generation += 1;
+      const local = { ...stripTracks(snapshot), revision };
+      await save(local);
+      return local;
     },
     hydrateLocal,
     reconcile,

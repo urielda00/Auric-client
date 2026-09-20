@@ -44,7 +44,7 @@ export class MockAudioEngine extends AudioEngine {
         itemId: this.itemId,
         context: options.context || null,
       },
-      ...(options.upcoming || []).slice(0, 3),
+      ...(options.upcoming || []),
     ];
     this._emitStatus();
     return generation;
@@ -119,7 +119,7 @@ export class MockAudioEngine extends AudioEngine {
 
   syncQueue(current, upcoming = []) {
     if (!current?.track || current.itemId !== this.itemId) return false;
-    this.projection = [current, ...upcoming.slice(0, 3)];
+    this.projection = [current, ...upcoming];
     return true;
   }
 

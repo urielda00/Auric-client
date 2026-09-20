@@ -230,6 +230,36 @@ test("rapid direct selection lets only the latest activation flush projection", 
   assert.deepEqual(harness.nativeProjections, [["B", "B-next", "B-later"]]);
 });
 
+test("one Next deferred during activation commits exactly once", () => {
+  const coordinator = createLatestActivationCoordinator();
+  const { token } = coordinator.begin(() => ({}));
+  coordinator.attachGeneration(token, 1);
+  assert.equal(coordinator.deferNext(), true);
+  assert.equal(coordinator.deferNext(), true);
+  assert.deepEqual(
+    coordinator.commitAndTakeProjectionRequest(token, (value) => value === 1),
+    { committed: true, projectionRequested: false, nextRequested: true },
+  );
+  assert.equal(coordinator.deferNext(), false);
+});
+
+test("a deferred Next from replaced activation cannot affect the replacement", () => {
+  const coordinator = createLatestActivationCoordinator();
+  const first = coordinator.begin(() => ({}));
+  coordinator.attachGeneration(first.token, 1);
+  coordinator.deferNext();
+  const second = coordinator.begin(() => ({}));
+  coordinator.attachGeneration(second.token, 2);
+  assert.equal(
+    coordinator.commitAndTakeProjectionRequest(first.token, () => true).committed,
+    false,
+  );
+  assert.deepEqual(
+    coordinator.commitAndTakeProjectionRequest(second.token, (value) => value === 2),
+    { committed: true, projectionRequested: false, nextRequested: false },
+  );
+});
+
 test("post-activation reorder and background requests project normally without loops", () => {
   const harness = projectionHarness();
   const token = harness.begin("current");
@@ -302,14 +332,29 @@ test("Remote Previous delegates to the same live-position semantics as foregroun
   assert.match(previous, /selectPreviousAction\(\{/);
   assert.match(previous, /hasHistory: playedStack\.length > 0/);
   assert.match(previous, /await get\(\)\.seek\(0\)/);
-  assert.match(previous, /playedStack: playedStack\.slice\(0, -1\)/);
-  assert.match(previous, /playedItems: playedItems\.slice\(0, -1\)/);
+  assert.match(previous, /const remainingHistory = playedItems\.slice\(0, -1\)/);
+  assert.match(previous, /initialHistory: remainingHistory/);
   assert.doesNotMatch(previous, /preferHistory/);
   assert.doesNotMatch(previous, /currentTrackId:\s*null/);
   assert.doesNotMatch(previous, /notifyExplicitPlaybackSelection/);
 });
 
-test("DEV playback snapshots cover direct refill, projection, and queued activation", () => {
+test("explicit queue and Previous navigation invalidate stale generated work", () => {
+  const source = readFileSync(
+    join(process.cwd(), "src/stores/usePlayerStore.js"),
+    "utf8",
+  );
+  const queuedStart = source.indexOf("async playQueued(");
+  const queued = source.slice(queuedStart, source.indexOf("async toggle(", queuedStart));
+  const previousStart = source.indexOf("async previous(");
+  const previous = source.slice(previousStart, source.indexOf("async next(", previousStart));
+  assert.match(queued, /invalidatePendingPlaybackWork\(set\)/);
+  assert.match(previous, /invalidatePendingPlaybackWork\(set\)/);
+  assert.match(source, /recommendationRequests\.invalidate\(\)/);
+  assert.match(source, /getQueueRefillCoordinator\(\)\.invalidate\(\)/);
+});
+
+test("DEV playback snapshots cover context projection and queued activation", () => {
   const source = readFileSync(
     join(process.cwd(), "src/stores/usePlayerStore.js"),
     "utf8",
@@ -322,14 +367,12 @@ test("DEV playback snapshots cover direct refill, projection, and queued activat
     "utf8",
   );
   for (const reason of [
-    "direct activation committed",
-    "direct refill completed",
-    "post-refill projection completed",
-    "post-refill projection settled",
+    "context activation committed",
     "playQueued activation committed",
   ]) {
     assert.match(source, new RegExp(reason));
   }
+  assert.match(source, /replaceQueueOnStart: true/);
   assert.match(source, /typeof __DEV__ !== "undefined" && __DEV__/);
   assert.match(source, /logicalCurrentItemId/);
   assert.match(source, /logicalUpcomingItemIds/);
@@ -337,6 +380,17 @@ test("DEV playback snapshots cover direct refill, projection, and queued activat
   assert.match(engine, /this\.player\.getActiveMediaItem\?\.\(\)/);
   assert.match(engine, /this\.player\.getActiveMediaItemIndex\?\.\(\)/);
   assert.match(source, /nativeIsPlaying/);
+});
+
+test("rapid context selections derive history from the last committed playback", () => {
+  const coordinator = createLatestActivationCoordinator();
+  const committed = { currentTrackId: "old", playedItems: [], queueEntries: ["old-next"] };
+  const first = coordinator.begin(() => committed);
+  assert.equal(coordinator.baselineOr(() => ({ currentTrackId: "optimistic-a" })), committed);
+  const second = coordinator.begin(() => ({ currentTrackId: "optimistic-a" }));
+  assert.equal(second.baseline, committed);
+  assert.equal(coordinator.fail(first.token), false);
+  assert.equal(coordinator.fail(second.token), true);
 });
 
 test("tap A, then B before A is ready commits only B", () => {
@@ -492,6 +546,66 @@ test("local playback hydration completes while remote reconciliation is unresolv
   const local = await coordinator.hydrateLocal();
   assert.equal(local.source, "local");
   assert.equal(local.snapshot.positionMs, 2468);
+});
+
+test("reconciliation finishing after a newer local selection is ignored", async () => {
+  let releaseSave;
+  let saveStarted;
+  const saving = new Promise((resolve) => { saveStarted = resolve; });
+  const storage = memoryStorage(localSnapshot({ positionMs: 111 }));
+  const originalSave = storage.save;
+  let blockRemoteSave = true;
+  storage.save = async (snapshot) => {
+    if (blockRemoteSave && snapshot.revision === 4) {
+      saveStarted();
+      await new Promise((resolve) => { releaseSave = resolve; });
+    }
+    await originalSave(snapshot);
+  };
+  const coordinator = createPlaybackSyncCoordinator({
+    enabled: true,
+    storage,
+    api: { get: async () => mapPlaybackSnapshot(dto()) },
+  });
+  const local = await coordinator.hydrateLocal();
+  const reconciliation = coordinator.reconcile(local.snapshot, local.generation);
+  await saving;
+  blockRemoteSave = false;
+  const selected = localSnapshot({ positionMs: 222 });
+  selected.current = { ...selected.current, id: "selection-b" };
+  const stage = coordinator.stageLocal(selected);
+  releaseSave();
+  await stage;
+  const result = await reconciliation;
+  assert.equal(result.source, "local-stale-hydration");
+  assert.equal(result.snapshot.current.id, CURRENT_ITEM_ID);
+  assert.equal((await coordinator.hydrateLocal()).snapshot.current.id, "selection-b");
+});
+
+test("a new context is locally durable before remote playback sync", async () => {
+  const storage = memoryStorage(localSnapshot());
+  const coordinator = createPlaybackSyncCoordinator({
+    enabled: true,
+    storage,
+    api: { get: async () => { throw new Error("offline"); } },
+  });
+  const selected = localSnapshot({ positionMs: 0 });
+  selected.current = { ...selected.current, id: "new-selection" };
+  selected.upcoming = [{
+    id: "next-item",
+    trackId: TRACK_DTO.id,
+    context: CONTEXT,
+  }];
+  selected.played = [{
+    id: "previous-item",
+    trackId: TRACK_DTO.id,
+    context: CONTEXT,
+  }];
+  await coordinator.stageLocal(selected);
+  const restored = await coordinator.hydrateLocal();
+  assert.equal(restored.snapshot.current.id, "new-selection");
+  assert.deepEqual(restored.snapshot.upcoming.map((item) => item.id), ["next-item"]);
+  assert.deepEqual(restored.snapshot.played.map((item) => item.id), ["previous-item"]);
 });
 
 test("bootstraps an untouched server once from durable legacy local state", async () => {

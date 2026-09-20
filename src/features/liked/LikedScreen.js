@@ -20,6 +20,7 @@ export default function LikedScreen() {
   const likesError = useLibraryStore((s) => s.likesError);
   const refreshLikes = useLibraryStore((s) => s.refreshLikes);
   const playLikedSongs = usePlayerStore((s) => s.playLikedSongs);
+  const playTrackFromContext = usePlayerStore((s) => s.playTrackFromContext);
   const shuffleLikedSongs = usePlayerStore((s) => s.shuffleLikedSongs);
 
   useEffect(() => {
@@ -84,12 +85,11 @@ export default function LikedScreen() {
             titleColor={index === 0 ? colors.pinkLight : colors.text}
             liked
             unavailable={track.hasMedia === false}
-            onPress={() =>
-              playLikedSongs([
-                track.id,
-                ...likedIds.filter((id) => id !== track.id),
-              ])
-            }
+            onPress={() => playTrackFromContext(
+              track.id,
+              likedTracks,
+              { type: 'liked_songs', label: 'Liked Songs' },
+            )}
             onToggleLike={() => toggleLike(track.id)}
           />
         )}
