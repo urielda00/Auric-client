@@ -314,6 +314,71 @@ test("successful activation always verifies the latest native projection", () =>
   assert.doesNotMatch(activationCommit, /if \(committed\.projectionRequested\)/);
 });
 
+test("context activation reasserts Play after native readiness", () => {
+  const source = readFileSync(
+    join(process.cwd(), "src/stores/usePlayerStore.js"),
+    "utf8",
+  );
+  const start = source.indexOf("async function activate(");
+  const activation = source.slice(start, source.indexOf("function createQueueEntries", start));
+  const firstPlay = activation.indexOf("await audioEngine.play(generation)");
+  const ready = activation.indexOf("await audioEngine.waitUntilReady?.(generation)");
+  const secondPlay = activation.indexOf(
+    "await audioEngine.play(generation)",
+    firstPlay + 1,
+  );
+  assert.ok(firstPlay >= 0 && firstPlay < ready);
+  assert.ok(ready < secondPlay);
+});
+
+test("ordinary track-list taps use context playback", () => {
+  for (const file of [
+    "src/features/home/HomeScreen.js",
+    "src/features/search/SearchScreen.js",
+    "src/features/history/HistoryScreen.js",
+    "src/features/liked/LikedScreen.js",
+  ]) {
+    const source = readFileSync(join(process.cwd(), file), "utf8");
+    assert.match(source, /playTrackFromContext/);
+  }
+});
+
+test("remote and in-app Next share recurring refill after native transition", () => {
+  const source = readFileSync(
+    join(process.cwd(), "src/stores/usePlayerStore.js"),
+    "utf8",
+  );
+  assert.match(source, /setOnRemoteNext\?\.\(\(\) => get\(\)\.next/);
+  const transitionStart = source.indexOf("async handleNativeTrackChanged(");
+  const transition = source.slice(
+    transitionStart,
+    source.indexOf("async recoverExhaustedNativeQueue", transitionStart),
+  );
+  assert.match(transition, /void get\(\)\.ensureQueueDepth\(\)/);
+});
+
+test("new contexts reset queue Previous while queue taps preserve visited history", () => {
+  const source = readFileSync(
+    join(process.cwd(), "src/stores/usePlayerStore.js"),
+    "utf8",
+  );
+  const contextStart = source.indexOf("async playTrackFromContext(");
+  const contextPlayback = source.slice(
+    contextStart,
+    source.indexOf("async playQueued(", contextStart),
+  );
+  const queuedStart = source.indexOf("async playQueued(");
+  const queuedPlayback = source.slice(
+    queuedStart,
+    source.indexOf("async toggle(", queuedStart),
+  );
+  assert.match(contextPlayback, /initialHistory: \[\]/);
+  assert.doesNotMatch(contextPlayback, /prior\.playedItems|selection\.previous/);
+  assert.match(queuedPlayback, /\.\.\.get\(\)\.playedItems/);
+  assert.doesNotMatch(queuedPlayback, /queue\.entries\.slice\(0, selectedIndex\)/);
+  assert.match(source, /onStarted:[\s\S]*recordPlay\(trackId\)/);
+});
+
 test("Remote Previous delegates to the same live-position semantics as foreground", () => {
   const source = readFileSync(
     join(process.cwd(), "src/stores/usePlayerStore.js"),

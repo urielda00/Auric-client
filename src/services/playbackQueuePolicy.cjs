@@ -1,5 +1,5 @@
 const DEFAULT_QUEUE_TARGET = 30;
-const DEFAULT_REFILL_THRESHOLD = 8;
+const DEFAULT_REFILL_THRESHOLD = 3;
 const DEFAULT_EMERGENCY_THRESHOLD = 3;
 const DEFAULT_RECENT_LIMIT = 20;
 const DEFAULT_FAILURE_COOLDOWN_MS = 5000;
@@ -185,6 +185,7 @@ function createQueueRefillCoordinator({
         }
         cacheTracks(batch);
         appendTracks(batch, mode);
+        lastFailureAt = -Infinity;
         return true;
       } catch {
         lastFailureAt = now();

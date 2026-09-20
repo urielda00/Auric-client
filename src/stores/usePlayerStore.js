@@ -339,20 +339,6 @@ export const usePlayerStore = create((set, get) => ({
       selection.upcoming,
       playbackContext,
     );
-    const prior = activations.baselineOr(() => get());
-    const previousItems = [
-      ...prior.playedItems,
-      ...(prior.currentTrackId && prior.currentTrackId !== trackId
-        ? [
-            {
-              id: prior.currentItemId || generateUuid(),
-              trackId: prior.currentTrackId,
-              context: prior.playbackContext,
-            },
-          ]
-        : []),
-      ...createQueueEntries(selection.previous, playbackContext),
-    ].slice(-PLAYED_STACK_LIMIT);
     invalidatePendingPlaybackWork(set);
     playbackStateService.markLocalChange();
     const activated = await activate(set, get, track, playbackContext, {
@@ -360,7 +346,7 @@ export const usePlayerStore = create((set, get) => ({
       endPreviousReason: "replaced",
       upcomingEntries,
       replaceQueueOnStart: true,
-      initialHistory: previousItems,
+      initialHistory: [],
       shuffleModeOnStart: null,
       openFullPlayer: true,
       activationDiagnosticReason: "context activation committed",
@@ -394,7 +380,6 @@ export const usePlayerStore = create((set, get) => ({
             },
           ]
         : []),
-      ...queue.entries.slice(0, selectedIndex),
     ].slice(-PLAYED_STACK_LIMIT);
     const activated = await activate(
       set,
@@ -722,6 +707,10 @@ async function activate(
     }
     await audioEngine.play(generation);
     await audioEngine.waitUntilReady?.(generation);
+    if (!activations.isCurrent(token, isNativeCurrent)) return false;
+    // Android can accept Play while preparing without starting once Ready.
+    // Reassert the same generation after readiness so a track tap always starts.
+    await audioEngine.play(generation);
     if (!activations.isCurrent(token, isNativeCurrent)) return false;
     if (previous.currentTrackId && endPreviousReason) {
       listeningTracker.end(endPreviousReason, previous.positionMs);
@@ -1074,10 +1063,11 @@ async function startRecommendation(set, get, mode) {
       context,
     );
     const activated = await activate(set, get, first, context, {
-      pushCurrentToStack: true,
+      pushCurrentToStack: false,
       endPreviousReason: "replaced",
       upcomingEntries,
       replaceQueueOnStart: true,
+      initialHistory: [],
       shuffleModeOnStart: mode,
     });
     if (!activated || !recommendationRequests.isCurrent(token)) return false;

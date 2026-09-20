@@ -478,6 +478,28 @@ test("a low queue refills to the rolling target while a healthy queue makes no r
   assert.equal(healthy.state.smartCalls.length, 0);
 });
 
+test("generated queue refills again on a later threshold crossing", async () => {
+  let request = 0;
+  const fixture = coordinatorFixture({
+    queueIds: ["queued-0", "queued-1", "queued-2"],
+    smartResult: () => {
+      request += 1;
+      return Array.from({ length: 30 }, (_, index) =>
+        playable(`refill-${request}-${index}`),
+      );
+    },
+  });
+  assert.equal(fixture.coordinator.constants.refillThreshold, 3);
+  assert.equal(await fixture.coordinator.refill(), true);
+  assert.equal(fixture.state.smartCalls.length, 1);
+  assert.equal(fixture.state.entries.length, DEFAULT_QUEUE_TARGET);
+
+  fixture.state.entries = fixture.state.entries.slice(-3);
+  assert.equal(await fixture.coordinator.refill(), true);
+  assert.equal(fixture.state.smartCalls.length, 2);
+  assert.equal(fixture.state.entries.length, DEFAULT_QUEUE_TARGET);
+});
+
 test("concurrent refill triggers share one network request", async () => {
   let resolveRequest;
   const request = new Promise((resolve) => {
@@ -675,7 +697,7 @@ test("Random Shuffle continuation uses random refill with exclusions", async () 
 
 test("generated queue never grows beyond the intended rolling-window target", async () => {
   const fixture = coordinatorFixture({
-    queueIds: Array.from({ length: 8 }, (_, index) => `queued-${index}`),
+    queueIds: Array.from({ length: 3 }, (_, index) => `queued-${index}`),
   });
   await fixture.coordinator.refill();
   assert.equal(fixture.state.entries.length, DEFAULT_QUEUE_TARGET);
