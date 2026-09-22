@@ -28,6 +28,9 @@ const {
   TrackPlayerAudioEngineCore,
 } = require("../src/services/audio/TrackPlayerAudioEngineCore.cjs");
 const {
+  restorePlaybackSnapshot,
+} = require("../src/services/audio/playbackRestore.cjs");
+const {
   createCompletionHandler,
   isCurrentPlaybackEvent,
   normalizeRestoredPosition,
@@ -361,6 +364,164 @@ const PLAYABLE_TRACK = {
   durationMs: 123000,
   hasMedia: true,
 };
+
+test("cold restore primes the persisted current and upcoming queue without autoplay", async () => {
+  const nextTrack = { ...PLAYABLE_TRACK, id: "track-2", title: "Next" };
+  const previousTrack = { ...PLAYABLE_TRACK, id: "track-0", title: "Previous" };
+  const snapshot = {
+    current: { id: "item-1", trackId: PLAYABLE_TRACK.id, track: PLAYABLE_TRACK,
+      context: { type: "album", label: "Album" } },
+    upcoming: [{ id: "item-2", trackId: nextTrack.id, track: nextTrack,
+      context: { type: "manual_queue", label: "Queue" } }],
+    played: [{ id: "item-0", trackId: previousTrack.id, track: previousTrack,
+      context: { type: "album", label: "Album" } }],
+    positionMs: 32000,
+  };
+
+  for (const action of ["reopen", "reopen", "reopen", "reopen", "reopen", "play", "next"]) {
+    const player = createFakeTrackPlayer();
+    const engine = new TrackPlayerAudioEngineCore({
+      player,
+      createSource: (track) => ({ uri: `https://auric.test/${track.id}` }),
+    });
+    const tracks = new Map();
+    const state = {};
+    let upcoming = [];
+    const transitions = [];
+    let completions = 0;
+    engine.setOnTrackChanged((event) => transitions.push(event));
+    engine.setOnEnded(() => { completions += 1; });
+    const setMediaItems = player.setMediaItems.bind(player);
+    player.setMediaItems = (...args) => {
+      setMediaItems(...args);
+      player.emit(EVENT.PLAYBACK_STATE, { state: "ended" });
+      player.emit(EVENT.MEDIA_ITEM_TRANSITION, { item: player.queue[1], index: 1 });
+    };
+
+    assert.equal(player.getActiveMediaItem(), null);
+    assert.equal(await restorePlaybackSnapshot({
+      snapshot,
+      getTrack: (id) => tracks.get(id),
+      cacheTracks: (items) => items.forEach((track) => tracks.set(track.id, track)),
+      hydrateQueue: (items) => { upcoming = items; },
+      setPlayer: (patch) => Object.assign(state, patch),
+      getCurrentTrackId: () => state.currentTrackId,
+      audioEngine: engine,
+      isPlayable: (track) => track?.hasMedia === true,
+      normalizePosition: normalizeRestoredPosition,
+      playbackFailureMessage: () => "Playback failed",
+    }), true);
+
+    assert.equal(state.currentTrackId, PLAYABLE_TRACK.id);
+    assert.equal(state.currentItemId, "item-1");
+    assert.equal(state.positionMs, 32000);
+    assert.equal(state.isPlaying, false);
+    assert.deepEqual(state.playedItems.map((item) => item.id), ["item-0"]);
+    assert.deepEqual(upcoming.map((item) => item.id), ["item-2"]);
+    assert.deepEqual(player.queue.map((item) => item.mediaId), ["item-1", "item-2"]);
+    assert.equal(player.getActiveMediaItem().mediaId, "item-1");
+    assert.equal(player.progress.position, 32);
+    assert.equal(player.playing, false);
+    assert.equal(player.calls.some(([name]) => name === "play"), false);
+    assert.equal(player.calls[0][1].android.taskRemovedBehavior, "stop");
+    assert.equal(completions, 0);
+    assert.deepEqual(transitions, []);
+    assert.equal(engine.isSilentRestore(), true);
+    player.progress.position = 0;
+    player.emit(EVENT.PROGRESS, { mediaId: "item-1", position: 0, duration: 123 });
+    assert.equal(engine.getStatus().positionMs, 32000);
+    player.progress.position = 32;
+
+    if (action === "play") {
+      engine.play();
+      player.emit(EVENT.PLAYBACK_STATE, { state: "ended" });
+      assert.equal(completions, 0);
+      player.emit(EVENT.IS_PLAYING, { playing: true });
+      assert.equal(player.getActiveMediaItem().mediaId, "item-1");
+    } else if (action === "next") {
+      assert.equal(await engine.next(), true);
+      assert.equal(player.getActiveMediaItem().mediaId, "item-2");
+      assert.deepEqual(transitions.map((event) => event.itemId), ["item-2"]);
+    } else {
+      assert.equal(player.playing, false);
+      continue;
+    }
+    assert.equal(player.playing, true);
+    assert.equal(engine.isSilentRestore(), false);
+  }
+});
+
+test("task removal cannot turn an empty native queue into completion", async () => {
+  const player = createFakeTrackPlayer();
+  const engine = new TrackPlayerAudioEngineCore({
+    player,
+    createSource: (track) => ({ uri: `https://auric.test/${track.id}` }),
+  });
+  let completions = 0;
+  engine.setOnEnded(() => { completions += 1; });
+  await engine.load(PLAYABLE_TRACK, { currentItemId: "item-1" });
+  engine.play();
+  player.emit(EVENT.IS_PLAYING, { playing: true });
+  player.queue = [];
+  player.activeIndex = null;
+  player.emit(EVENT.MEDIA_ITEM_TRANSITION, { item: null, index: 0 });
+  player.emit(EVENT.PLAYBACK_STATE, { state: "ended" });
+  assert.equal(completions, 0);
+
+  await engine.load(PLAYABLE_TRACK, { currentItemId: "item-1" });
+  engine.play();
+  player.emit(EVENT.IS_PLAYING, { playing: true });
+  player.emit(EVENT.PLAYBACK_STATE, { state: "ended" });
+  assert.equal(completions, 1);
+});
+
+test("silent restore re-primes the saved current item if native active index drifts", async () => {
+  const player = createFakeTrackPlayer();
+  const engine = new TrackPlayerAudioEngineCore({
+    player,
+    createSource: (track) => ({ uri: `https://auric.test/${track.id}` }),
+  });
+  const nextTrack = { ...PLAYABLE_TRACK, id: "track-2" };
+  const upcoming = [{ id: "item-2", itemId: "item-2", track: nextTrack }];
+  const transitions = [];
+  engine.setOnTrackChanged((event) => transitions.push(event));
+  await engine.restorePaused(PLAYABLE_TRACK, {
+    currentItemId: "item-1",
+    upcoming,
+    positionMs: 32000,
+  });
+
+  player.activeIndex = 1;
+  player.emit(EVENT.MEDIA_ITEM_TRANSITION, { item: player.queue[1], index: 1 });
+  assert.equal(engine.getStatus().itemId, "item-1");
+  assert.equal(engine.getStatus().isLoaded, false);
+  assert.deepEqual(transitions, []);
+
+  assert.equal(await engine.syncQueue(
+    { track: PLAYABLE_TRACK, itemId: "item-1" },
+    upcoming,
+  ), true);
+  assert.equal(player.getActiveMediaItem().mediaId, "item-1");
+  assert.deepEqual(player.queue.map((item) => item.mediaId), ["item-1", "item-2"]);
+  assert.equal(player.progress.position, 32);
+  assert.equal(player.playing, false);
+  assert.equal(engine.isSilentRestore(), true);
+
+  assert.equal(await engine.next(), true);
+  assert.equal(player.getActiveMediaItem().mediaId, "item-2");
+  const reopenedPlayer = createFakeTrackPlayer();
+  const reopenedEngine = new TrackPlayerAudioEngineCore({
+    player: reopenedPlayer,
+    createSource: (track) => ({ uri: `https://auric.test/${track.id}` }),
+  });
+  await reopenedEngine.restorePaused(nextTrack, {
+    currentItemId: "item-2",
+    positionMs: 5000,
+  });
+  assert.equal(reopenedPlayer.getActiveMediaItem().mediaId, "item-2");
+  assert.equal(reopenedPlayer.progress.position, 5);
+  assert.equal(reopenedPlayer.playing, false);
+});
 
 test("Track Player adapter configures native queue, media controls, and real status", async () => {
   const player = createFakeTrackPlayer();

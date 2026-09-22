@@ -59,7 +59,7 @@ async function restorePlaybackSnapshot({
   });
   if (!loadAudio) return true;
   try {
-    await audioEngine.load(track, {
+    const nativeRestore = {
       currentItemId: snapshot.current.id,
       context: snapshot.current.context,
       upcoming: snapshot.upcoming.map((item) => ({
@@ -67,10 +67,19 @@ async function restorePlaybackSnapshot({
         itemId: item.id,
         track: item.track || getTrack(item.trackId),
       })),
-    });
+    };
+    if (audioEngine.restorePaused) {
+      await audioEngine.restorePaused(track, {
+        ...nativeRestore,
+        positionMs,
+      });
+    } else {
+      await audioEngine.load(track, nativeRestore);
+      if (getCurrentTrackId() !== trackId) return false;
+      await audioEngine.seekTo(positionMs);
+    }
     if (getCurrentTrackId() !== trackId) return false;
-    await audioEngine.seekTo(positionMs);
-    setPlayer({ isPlaying: false });
+    setPlayer({ isPlaying: false, isBuffering: false, isLoading: false });
     return true;
   } catch {
     if (getCurrentTrackId() === trackId) {

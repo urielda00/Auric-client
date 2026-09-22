@@ -72,6 +72,7 @@ let backgroundReconciliation = null;
 let nativeProjectionSync = null;
 let nativeProjectionDirty = false;
 let queueSessionId = null;
+let coldRestoreDepth = 0;
 const nextTransitionGate = createTransitionGate();
 const nativeTransitions = createIdempotentTransitionTracker();
 
@@ -180,6 +181,7 @@ export const usePlayerStore = create((set, get) => ({
       void syncNativeProjection(get);
     });
     audioEngine.setOnStatus((status) => {
+      if (coldRestoreDepth > 0) return;
       if (
         !isCurrentPlaybackEvent(
           status,
@@ -228,19 +230,27 @@ export const usePlayerStore = create((set, get) => ({
         backgroundSessionReady: get().hydrated,
       }),
     );
-    audioEngine.setOnEnded(
-      createCompletionHandler({
-        getCurrentTrackId: () => get().currentTrackId,
-        next: () => get().recoverExhaustedNativeQueue(),
-      }),
-    );
+    const handleCompletion = createCompletionHandler({
+      getCurrentTrackId: () => get().currentTrackId,
+      next: () => get().recoverExhaustedNativeQueue(),
+    });
+    audioEngine.setOnEnded((event) => {
+      if (coldRestoreDepth > 0 || audioEngine.isSilentRestore?.()) {
+        tracePlaybackMutation("native completion suppressed during restore", get, get(), {
+          intendedTrackId: event?.trackId, force: true,
+          details: { eventItemId: event?.itemId },
+        });
+        return false;
+      }
+      return handleCompletion(event);
+    });
 
     localHydration = await playbackStateService.hydrateLocal();
     if (localHydration.snapshot &&
       playbackStateService.isGenerationCurrent(localHydration.generation) &&
       !activations.hasUncommittedSelection()) {
       await applyRestoredSnapshot(set, get, localHydration.snapshot, {
-        loadAudio: false,
+        loadAudio: initializeAudio,
         refillQueue: false,
         source: "local hydration",
       });
@@ -253,6 +263,13 @@ export const usePlayerStore = create((set, get) => ({
   },
 
   async handleNativeTrackChanged(event) {
+    if (coldRestoreDepth > 0 || audioEngine.isSilentRestore?.()) {
+      tracePlaybackMutation("native transition suppressed during restore", get, get(), {
+        intendedTrackId: event?.trackId, force: true,
+        details: { eventItemId: event?.itemId },
+      });
+      return false;
+    }
     const native = audioEngine.getNativePlaybackSnapshot?.();
     if ((event?.generation != null && !audioEngine.isGenerationCurrent(event.generation)) ||
       (native?.nativeActiveMediaId && native.nativeActiveMediaId !== event?.itemId)) {
@@ -371,7 +388,7 @@ export const usePlayerStore = create((set, get) => ({
             playbackStateService.isGenerationCurrent(local?.generation)
           ) {
             return applyRestoredSnapshot(set, get, restored.snapshot, {
-              loadAudio: false,
+              loadAudio: true,
               source: "background reconciliation",
             });
           }
@@ -1234,33 +1251,38 @@ async function applyRestoredSnapshot(
     force: true,
     details: { snapshotItemId: snapshot.current?.id, revision: snapshot.revision },
   });
-  retryPlans.clear();
-  activations.invalidate();
-  audioEngine.cancelActivation?.();
-  tracePlaybackMutation(`${source} native cancel`, get, before, { intendedTrackId: snapshot.current?.trackId, force: true });
-  queueSessionId = snapshot.current?.id ?? null;
-  const restored = await restorePlaybackSnapshot({
-    snapshot,
-    getTrack: (id) => useLibraryStore.getState().getTrackById(id),
-    cacheTracks: (tracks) => useLibraryStore.getState().cacheTracks(tracks),
-    hydrateQueue: (items) => useQueueStore.getState().hydrateSnapshot(items),
-    setPlayer: (patch) => setPlayback(set, get, patch, source, {
+  if (loadAudio) coldRestoreDepth += 1;
+  try {
+    retryPlans.clear();
+    activations.invalidate();
+    audioEngine.cancelActivation?.();
+    tracePlaybackMutation(`${source} native cancel`, get, before, { intendedTrackId: snapshot.current?.trackId, force: true });
+    queueSessionId = snapshot.current?.id ?? null;
+    const restored = await restorePlaybackSnapshot({
+      snapshot,
+      getTrack: (id) => useLibraryStore.getState().getTrackById(id),
+      cacheTracks: (tracks) => useLibraryStore.getState().cacheTracks(tracks),
+      hydrateQueue: (items) => useQueueStore.getState().hydrateSnapshot(items),
+      setPlayer: (patch) => setPlayback(set, get, patch, source, {
+        intendedTrackId: snapshot.current?.trackId,
+      }),
+      getCurrentTrackId: () => get().currentTrackId,
+      audioEngine,
+      isPlayable: isTrackPlayable,
+      normalizePosition: normalizeRestoredPosition,
+      playbackFailureMessage,
+      loadAudio,
+    });
+    tracePlaybackMutation(`${source} applied`, get, before, {
       intendedTrackId: snapshot.current?.trackId,
-    }),
-    getCurrentTrackId: () => get().currentTrackId,
-    audioEngine,
-    isPlayable: isTrackPlayable,
-    normalizePosition: normalizeRestoredPosition,
-    playbackFailureMessage,
-    loadAudio,
-  });
-  tracePlaybackMutation(`${source} applied`, get, before, {
-    intendedTrackId: snapshot.current?.trackId,
-    force: true,
-    details: { restored },
-  });
-  if (refillQueue) void get().ensureQueueDepth();
-  return restored;
+      force: true,
+      details: { restored },
+    });
+    if (refillQueue) void get().ensureQueueDepth();
+    return restored;
+  } finally {
+    if (loadAudio) coldRestoreDepth -= 1;
+  }
 }
 
 async function startRecommendation(set, get, mode) {

@@ -100,6 +100,8 @@ class TrackPlayerAudioEngineCore {
     this.itemId = null;
     this.generation = 0;
     this.suppressedActivationItemId = null;
+    this.silentRestoreItemId = null;
+    this.hasPlayedCurrentItem = false;
     this.pendingTransition = null;
     this.readyWaiter = null;
     this.authenticationFailures = new Set();
@@ -126,7 +128,7 @@ class TrackPlayerAudioEngineCore {
       progressSync: { intervalSeconds: 1 },
       android: {
         wakeMode: "network",
-        taskRemovedBehavior: "continue",
+        taskRemovedBehavior: "stop",
         notification: {
           channelId: "com.auric.player.playback",
           channelName: "Auric playback",
@@ -181,6 +183,8 @@ class TrackPlayerAudioEngineCore {
     this.trackId = track.id;
     this.itemId = current.itemId;
     this.suppressedActivationItemId = current.itemId;
+    this.silentRestoreItemId = options.silentRestore ? current.itemId : null;
+    this.hasPlayedCurrentItem = false;
     this.status = {
       ...DEFAULT_STATUS,
       durationMs: Number.isFinite(track.durationMs) ? track.durationMs : 0,
@@ -207,8 +211,29 @@ class TrackPlayerAudioEngineCore {
     return loadGeneration;
   }
 
+  async restorePaused(track, options = {}) {
+    this.silentRestoreItemId = options.currentItemId || track.id;
+    this.initialize();
+    this.player.pause();
+    try {
+      await this.load(track, { ...options, silentRestore: true });
+      this.seekTo(options.positionMs || 0);
+      this.status.positionMs = Math.max(0, options.positionMs || 0);
+      this.player.pause();
+      const active = this.player.getActiveMediaItem?.();
+      if (active?.mediaId !== this.silentRestoreItemId) {
+        throw new Error("NATIVE_QUEUE_NOT_READY");
+      }
+      this.suppressedActivationItemId = null;
+    } catch (error) {
+      this.silentRestoreItemId = null;
+      throw error;
+    }
+  }
+
   beginActivation() {
     this.initialize();
+    this.silentRestoreItemId = null;
     const generation = this._beginGeneration();
     if (this.itemId) {
       this.player.pause();
@@ -218,6 +243,7 @@ class TrackPlayerAudioEngineCore {
   }
 
   cancelActivation() {
+    this.silentRestoreItemId = null;
     const generation = this._beginGeneration();
     if (this.initialized && this.itemId) {
       this.player.pause();
@@ -239,6 +265,12 @@ class TrackPlayerAudioEngineCore {
       throw new Error("STALE_ACTIVATION");
     }
     if (!this.itemId) throw new Error("NO_AUDIO_LOADED");
+    if (this.silentRestoreItemId) {
+      if (this.player.getActiveMediaItem?.()?.mediaId !== this.itemId) {
+        throw new Error("NATIVE_QUEUE_NOT_READY");
+      }
+      this.silentRestoreItemId = null;
+    }
     if (this.diagnostics && this.diagnostics.playRequestedAtMs === null) {
       this.diagnostics.playRequestedAtMs = this.now();
     }
@@ -301,6 +333,7 @@ class TrackPlayerAudioEngineCore {
       try {
         if (active?.mediaId === this.itemId && this.player.isPlaying() === true) {
           this.status.isPlaying = true;
+          this.hasPlayedCurrentItem = true;
           this._emitStatus();
           return true;
         }
@@ -332,6 +365,7 @@ class TrackPlayerAudioEngineCore {
     const queue = this.player.getQueue();
     const nextItem = queue[currentIndex + 1];
     if (!nextItem) return Promise.resolve(false);
+    this.silentRestoreItemId = null;
 
     let resolveTransition;
     let rejectTransition;
@@ -384,6 +418,20 @@ class TrackPlayerAudioEngineCore {
       isPlayable: (track) => track?.hasMedia === true,
     });
     const nextItems = desired.map((item) => nativeItem(item, this.createSource));
+    if (
+      this.silentRestoreItemId === current.itemId &&
+      this.player.getActiveMediaItem?.()?.mediaId !== current.itemId
+    ) {
+      await this._setQueueWhenControllerReady(
+        nextItems.map(publicNativeItem),
+        this.generation,
+      );
+      this.projection = desired;
+      this.nativeItems = nextItems;
+      this.seekTo(this.status.positionMs);
+      this.player.pause();
+      return true;
+    }
     return this._syncQueueWhenControllerReady(
       current,
       desired,
@@ -419,10 +467,20 @@ class TrackPlayerAudioEngineCore {
         ) {
           this.diagnostics.playingAtMs = this.now();
         }
+        if (this.status.isPlaying && !this.silentRestoreItemId) {
+          try {
+            if (this.player.getActiveMediaItem?.()?.mediaId === this.itemId) {
+              this.hasPlayedCurrentItem = true;
+            }
+          } catch {
+            // Wait for the controller to reconnect before confirming playback.
+          }
+        }
         this._emitStatus();
         break;
       case EVENT.PROGRESS:
         if (event.mediaId !== this.itemId) return;
+        if (this.silentRestoreItemId) return;
         this.status.positionMs = Math.max(0, Math.round(event.position * 1000));
         this.status.durationMs = Math.max(0, Math.round(event.duration * 1000));
         if (this.diagnostics?.firstProgressAtMs === null) {
@@ -467,15 +525,27 @@ class TrackPlayerAudioEngineCore {
     if (this.itemId) {
       try {
         const progress = this.player.getProgress();
-        this.status.positionMs = Math.max(
-          0,
-          Math.round((progress.position || 0) * 1000),
-        );
+        if (!this.silentRestoreItemId) {
+          this.status.positionMs = Math.max(
+            0,
+            Math.round((progress.position || 0) * 1000),
+          );
+        }
         this.status.durationMs = Math.max(
           0,
           Math.round((progress.duration || 0) * 1000),
         );
         this.status.isPlaying = this.player.isPlaying() === true;
+        if (this.status.isPlaying && !this.silentRestoreItemId &&
+          this.player.getActiveMediaItem?.()?.mediaId === this.itemId) {
+          this.hasPlayedCurrentItem = true;
+        }
+        if (
+          this.silentRestoreItemId &&
+          this.player.getActiveMediaItem?.()?.mediaId !== this.itemId
+        ) {
+          this.status.isLoaded = false;
+        }
       } catch {
         // The last event-derived status remains valid while the service reconnects.
       }
@@ -486,6 +556,10 @@ class TrackPlayerAudioEngineCore {
       itemId: this.itemId,
       generation: this.generation,
     };
+  }
+
+  isSilentRestore() {
+    return this.silentRestoreItemId !== null;
   }
 
   getDiagnostics() {
@@ -698,6 +772,7 @@ class TrackPlayerAudioEngineCore {
       try {
         if (this.player.isPlaying() === true) {
           this.status.isPlaying = true;
+          this.hasPlayedCurrentItem = true;
           this._emitStatus();
           return true;
         }
@@ -741,11 +816,22 @@ class TrackPlayerAudioEngineCore {
     } else if (state === "ended") {
       this.status.isPlaying = false;
       this.status.isBuffering = false;
-      backgroundWork = this.onEnded?.({
-        trackId: this.trackId,
-        itemId: this.itemId,
-        generation: this.generation,
-      });
+      let activeId = null;
+      let nativeState = null;
+      try {
+        activeId = this.player.getActiveMediaItem?.()?.mediaId;
+        nativeState = this.player.getPlaybackState?.();
+      } catch {
+        // A stopped service has no active media item to complete.
+      }
+      if (!this.silentRestoreItemId && this.hasPlayedCurrentItem &&
+        this.itemId && activeId === this.itemId && nativeState === "ended") {
+        backgroundWork = this.onEnded?.({
+          trackId: this.trackId,
+          itemId: this.itemId,
+          generation: this.generation,
+        });
+      }
     }
     this._emitStatus();
     return backgroundWork;
@@ -754,6 +840,12 @@ class TrackPlayerAudioEngineCore {
   _handleTransition(event) {
     const transition = normalizedTransition(event);
     if (!transition?.trackId || !transition.itemId) return;
+    if (this.silentRestoreItemId) {
+      if (transition.itemId === this.silentRestoreItemId) {
+        this.suppressedActivationItemId = null;
+      }
+      return;
+    }
     if (
       this.suppressedActivationItemId &&
       transition.itemId !== this.suppressedActivationItemId
@@ -782,6 +874,7 @@ class TrackPlayerAudioEngineCore {
       null;
     this.trackId = transition.trackId;
     this.itemId = transition.itemId;
+    this.hasPlayedCurrentItem = false;
     const suppressed = this.suppressedActivationItemId === transition.itemId;
     if (!suppressed) this.generation += 1;
     this.status = {
@@ -967,6 +1060,7 @@ class TrackPlayerAudioEngineCore {
   }
 
   _emitStatus() {
+    if (this.silentRestoreItemId) return;
     this.onStatus?.({
       ...this.status,
       trackId: this.trackId,

@@ -1202,6 +1202,14 @@ test("restores playback UI without loading network audio", async () => {
   assert.equal(state.isLoading, false);
 });
 
+test("cold restore guards cancellation before native callbacks can advance the queue", () => {
+  const source = readFileSync(join(process.cwd(), "src/stores/usePlayerStore.js"), "utf8");
+  const restore = source.slice(source.indexOf("async function applyRestoredSnapshot("));
+  assert.ok(restore.indexOf("coldRestoreDepth += 1") <
+    restore.indexOf("audioEngine.cancelActivation?.()"));
+  assert.match(source, /coldRestoreDepth > 0 \|\| audioEngine\.isSilentRestore\?\.\(\)/);
+});
+
 test("checkpoint cadence is bounded while explicit seek/background flushes can force it", () => {
   const gate = createCheckpointGate(15000);
   assert.equal(gate.shouldCheckpoint({ nowMs: 1000, isPlaying: true }), false);
