@@ -11,6 +11,7 @@ import { usePlayerStore } from '../../stores/usePlayerStore';
 import { useMeasuredHeight } from '../../hooks/useMeasuredHeight';
 import { useMiniPlayerBottomInset } from '../../hooks/useBottomContentInset';
 import { colors, gradients, shadows } from '../../constants/theme';
+const { playTrackFromList } = require('../../services/pressInteraction.cjs');
 
 export default function LikedScreen() {
   const likedIds = useLibraryStore((s) => s.likedIds);
@@ -85,11 +86,11 @@ export default function LikedScreen() {
             titleColor={index === 0 ? colors.pinkLight : colors.text}
             liked
             unavailable={track.hasMedia === false}
-            onPress={() => playTrackFromContext(
-              track.id,
-              likedTracks,
-              { type: 'liked_songs', label: 'Liked Songs' },
-            )}
+            onPress={() => playTrackFromList({
+              track, tracks: likedTracks, index,
+              context: { type: 'liked_songs', label: 'Liked Songs' },
+              playTrackFromContext,
+            })}
             onToggleLike={() => toggleLike(track.id)}
           />
         )}

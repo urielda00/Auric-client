@@ -1,10 +1,13 @@
 const assert = require("node:assert/strict");
+const { readFileSync } = require("node:fs");
+const { join } = require("node:path");
 const test = require("node:test");
 
 const {
   createRecommendationApi,
   createRecommendationRequestCoordinator,
   createLatestRequestGate,
+  freshQuickPicksSeed,
 } = require("../src/services/recommendationApi.cjs");
 const {
   prepareRecommendationPlayback,
@@ -43,6 +46,68 @@ test("Quick Picks load maps server reasons and Track DTOs", async () => {
   assert.equal(picks[0].track.durationMs, 100000);
   assert.equal(picks[0].label, "You love this");
   assert.deepEqual(requestOptions.query, { seed: 42 });
+});
+
+test("manual refresh sends seed and displayed IDs to the network request", async () => {
+  let observed;
+  const api = createRecommendationApi({
+    async get(path, options) {
+      observed = { path, options };
+      return { data: [{ track: TRACK, reason: "loved", reason_label: "You love this" }] };
+    },
+  });
+  await api.quickPicks({ seed: 321, excludeTrackIds: [TRACK.id] });
+  assert.equal(observed.path, "/api/v1/recommendations/quick-picks");
+  assert.deepEqual(observed.options.query, { seed: 321, exclude_track_ids: TRACK.id });
+});
+
+test("Home refresh uses a fresh valid seed even after a screen remount", () => {
+  assert.equal(freshQuickPicksSeed(0, () => 0), 1);
+  assert.equal(freshQuickPicksSeed(0, () => 0.5), 0x8000_0000);
+  assert.equal(freshQuickPicksSeed(0xFFFF_FFFF, () => 1 - 1 / 0x1_0000_0000), 0);
+});
+
+test("explicit Home refresh does not silently replay cached picks on request failure", async () => {
+  const prior = [{ track: TRACK, reason: "loved", label: "You love this" }];
+  const loader = createCachedRemoteLoader({
+    loadRemote: async () => { throw new Error("offline"); },
+    loadCache: async () => prior,
+    saveCache: async () => {},
+  });
+  await assert.rejects(loader.load({ seed: 123, freshOnly: true }), /offline/);
+  assert.deepEqual(await loader.load({ seed: 0 }), { value: prior, cached: true });
+});
+
+test("an older server rejecting refresh exclusions remains a visible request failure", async () => {
+  let cacheReads = 0;
+  const error = Object.assign(new Error("Invalid query"), { status: 422 });
+  const loader = createCachedRemoteLoader({
+    loadRemote: async () => { throw error; },
+    loadCache: async () => { cacheReads += 1; return [TRACK]; },
+    saveCache: async () => {},
+  });
+  await assert.rejects(loader.load({ seed: 321, freshOnly: true, excludeTrackIds: [TRACK.id] }),
+    (received) => received.status === 422);
+  assert.equal(cacheReads, 0);
+});
+
+test("Home pull refresh requests a fresh seed and disallows cached fallback", () => {
+  const source = readFileSync(join(process.cwd(), "src/features/home/HomeScreen.js"), "utf8");
+  const pull = readFileSync(join(process.cwd(), "src/components/PullToRefreshScrollView.js"), "utf8");
+  const refresh = source.slice(source.indexOf("  const handleRefresh ="), source.indexOf("  const handlePlay ="));
+  assert.match(pull, /runOnJS\(beginRefresh\)\(\)/);
+  assert.match(pull, /Promise\.resolve\(onRefresh\?\.\(\)\)/);
+  assert.match(source, /onRefresh=\{handleRefresh\}/);
+  assert.match(refresh, /freshQuickPicksSeed\(seedRef\.current\)/);
+  assert.match(refresh, /loadPicks\(nextSeed, \{ freshOnly: true, excludeTrackIds: pickIds\(picks\) \}\)/);
+});
+
+test("Home reload requests a new seeded set excluding its cached visible tracks", () => {
+  const source = readFileSync(join(process.cwd(), "src/features/home/HomeScreen.js"), "utf8");
+  const hydration = source.slice(source.indexOf("  useEffect(() => {"), source.indexOf("  const handleRefresh ="));
+  assert.match(hydration, /const nextSeed = freshQuickPicksSeed\(seedRef\.current\)/);
+  assert.match(hydration, /loadPicks\(nextSeed, \{ freshOnly: true, excludeTrackIds: pickIds\(cachedPicks\) \}\)/);
+  assert.match(source, /visible picks committed/);
 });
 
 test("Smart and Random request separate server capabilities", async () => {

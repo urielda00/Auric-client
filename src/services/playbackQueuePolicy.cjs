@@ -118,6 +118,7 @@ function createQueueRefillCoordinator({
   cacheTracks,
   appendTracks,
   isPlayable,
+  trace = () => {},
   now = Date.now,
   target = DEFAULT_QUEUE_TARGET,
   refillThreshold = DEFAULT_REFILL_THRESHOLD,
@@ -126,9 +127,11 @@ function createQueueRefillCoordinator({
   failureCooldownMs = DEFAULT_FAILURE_COOLDOWN_MS,
 }) {
   let inFlight = null;
+  let inFlightGeneration = null;
   let queuedRerun = null;
   let generation = 0;
   let rerunRequested = false;
+  let rerunOptions = null;
   let lastFailureAt = -Infinity;
   let lastEmergencyAt = -Infinity;
 
@@ -137,7 +140,20 @@ function createQueueRefillCoordinator({
     const queueEntries = getQueueEntries();
     const threshold = emergency ? emergencyThreshold : refillThreshold;
     if (!force && queueEntries.length > threshold) return false;
-    if (inFlight) return inFlight;
+    trace("refill trigger", { upcomingCount: queueEntries.length, threshold, force, emergency });
+    if (inFlight) {
+      if (inFlightGeneration !== generation) {
+        rerunRequested = true;
+        if (force || emergency) {
+          rerunOptions = {
+            force: force || rerunOptions?.force || false,
+            emergency: emergency || rerunOptions?.emergency || false,
+          };
+        }
+        return inFlight.then(() => queuedRerun || false);
+      }
+      return inFlight;
+    }
     if (emergency) {
       if (now() - lastEmergencyAt < failureCooldownMs) return false;
       lastEmergencyAt = now();
@@ -156,13 +172,19 @@ function createQueueRefillCoordinator({
     );
     const capacity = Math.max(0, target - queueEntries.length);
     if (!capacity) return false;
-    const mode = getMode() === "random" ? "random" : "smart";
+    trace("refill requested", { count: capacity, upcomingCount: queueEntries.length });
+    const explicitMode = getMode();
+    const mode = explicitMode === "random"
+      ? "random"
+      : explicitMode === "smart" ? "smart" : "continuation";
 
+    inFlightGeneration = requestGeneration;
     inFlight = (async () => {
       try {
         const tracks = await (mode === "random"
           ? requestRandom(capacity, { excludeTrackIds: exclusions })
           : requestSmart(capacity, { excludeTrackIds: exclusions }));
+        trace("recommendation result", { count: tracks.length, requestedCount: capacity });
         if (requestGeneration !== generation) return false;
         const liveEntries = getQueueEntries();
         const liveExclusions = buildRefillExclusions(
@@ -185,19 +207,23 @@ function createQueueRefillCoordinator({
         }
         cacheTracks(batch);
         appendTracks(batch, mode);
+        trace("queue after refill", { queueSize: getQueueEntries().length, appendedCount: batch.length });
         lastFailureAt = -Infinity;
         return true;
       } catch {
-        lastFailureAt = now();
+        if (requestGeneration === generation) lastFailureAt = now();
         return false;
       } finally {
         inFlight = null;
+        inFlightGeneration = null;
         if (rerunRequested) {
           rerunRequested = false;
           const rerunGeneration = generation;
+          const options = rerunOptions || {};
+          rerunOptions = null;
           const rerun = Promise.resolve()
             .then(() =>
-              rerunGeneration === generation ? performRefill() : false,
+              rerunGeneration === generation ? performRefill(options) : false,
             )
             .catch(() => false)
             .finally(() => {
@@ -216,6 +242,7 @@ function createQueueRefillCoordinator({
     invalidate({ refillAfterPending = false } = {}) {
       generation += 1;
       rerunRequested = Boolean(inFlight && refillAfterPending);
+      rerunOptions = null;
     },
     isPending() {
       return Boolean(inFlight);

@@ -283,6 +283,39 @@ class TrackPlayerAudioEngineCore {
     return promise;
   }
 
+  async waitUntilPlaying(generation = this.generation, timeoutMs = 15000) {
+    const deadline = this.now() + timeoutMs;
+    let nextPlayAt = this.now() + 250;
+    do {
+      if (!this.isGenerationCurrent(generation))
+        throw new Error("STALE_ACTIVATION");
+      if (this.status.error) throw new Error(this.status.error.code);
+      let active = null;
+      try {
+        active = this.player.getActiveMediaItem?.();
+      } catch {
+        // Keep waiting while Android reconnects the media controller.
+      }
+      if (active?.mediaId && active.mediaId !== this.itemId)
+        throw new Error("STALE_ACTIVATION");
+      try {
+        if (active?.mediaId === this.itemId && this.player.isPlaying() === true) {
+          this.status.isPlaying = true;
+          this._emitStatus();
+          return true;
+        }
+      } catch {
+        // The controller may briefly reconnect after accepting the queue.
+      }
+      if (this.now() >= nextPlayAt) {
+        this.play(generation);
+        nextPlayAt = this.now() + 500;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    } while (this.now() < deadline);
+    throw new Error("NATIVE_PLAYBACK_DID_NOT_START");
+  }
+
   pause() {
     if (!this.initialized) return;
     this.player.pause();
@@ -533,13 +566,20 @@ class TrackPlayerAudioEngineCore {
   async _setQueueWhenControllerReady(items, generation) {
     const expectedIds = items.map((item) => item.mediaId);
     const deadline = this.now() + this.queueAcceptanceTimeoutMs;
+    let nextSetAt = -Infinity;
     do {
       if (generation !== this.generation)
         throw new Error("STALE_ACTIVATION");
-      this.player.setMediaItems(items, 0);
+      // Android dispatches setMediaItems and prepare asynchronously. Repeating
+      // both on every 25 ms poll can reset preparation before Play takes hold.
+      if (this.now() >= nextSetAt) {
+        this.player.setMediaItems(items, 0);
+        nextSetAt = this.now() + 500;
+      }
       const queueIds = this.player.getQueue().map((item) => item.mediaId);
       if (
         this.player.getActiveMediaItemIndex?.() === 0 &&
+        this.player.getActiveMediaItem?.()?.mediaId === expectedIds[0] &&
         queueIds.length === expectedIds.length &&
         queueIds.every((id, index) => id === expectedIds[index])
       ) {

@@ -51,9 +51,23 @@ function createQueuePlaybackControls(toggle) {
   };
 }
 
+function createQueueItemPressHandler(playQueued, playbackContext) {
+  return (item) => {
+    if (typeof __DEV__ !== "undefined" && __DEV__) {
+      console.debug("[AuricPlayback] queue item tap", {
+        trackId: item.trackId,
+        itemId: item.id,
+        context: (item.context || playbackContext)?.type,
+      });
+    }
+    return playQueued(item.trackId, item.context || playbackContext, item.id);
+  };
+}
+
 module.exports = {
   PLAYED_ROW_HEIGHT,
   createQueuePlaybackControls,
+  createQueueItemPressHandler,
   deriveQueueTimeline,
   getQueueInitialOffset,
 };

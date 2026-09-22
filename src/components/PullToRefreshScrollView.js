@@ -31,6 +31,7 @@ export default function PullToRefreshScrollView({ onRefresh, children, contentCo
   }, [pullHeight]);
 
   const beginRefresh = useCallback(() => {
+    if (typeof __DEV__ !== 'undefined' && __DEV__) console.debug('[AuricHome] gesture threshold reached');
     setRefreshing(true);
     const startedAt = Date.now();
     Promise.resolve(onRefresh?.()).finally(() => {

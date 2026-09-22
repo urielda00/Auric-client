@@ -10,7 +10,7 @@ function createCachedRemoteLoader({ loadRemote, loadCache, saveCache }) {
         await saveCache(value);
         return { value, cached: false };
       } catch (error) {
-        if (options.signal?.aborted) throw error;
+        if (options.signal?.aborted || options.freshOnly) throw error;
         const cached = await loadCache();
         if (cached != null) return { value: cached, cached: true };
         throw error;

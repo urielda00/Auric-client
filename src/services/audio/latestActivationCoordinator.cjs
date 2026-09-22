@@ -105,4 +105,23 @@ function createLatestActivationCoordinator() {
   };
 }
 
-module.exports = { createLatestActivationCoordinator };
+function createActivationRetryCoordinator() {
+  let plan = null;
+  return {
+    clear() {
+      plan = null;
+    },
+    capture(value) {
+      plan = {
+        ...value,
+        upcomingEntries: value.upcomingEntries.map((item) => ({ ...item })),
+        initialHistory: value.initialHistory?.map((item) => ({ ...item })) ?? null,
+      };
+    },
+    match(trackId, itemId) {
+      return plan?.trackId === trackId && plan.itemId === itemId ? plan : null;
+    },
+  };
+}
+
+module.exports = { createActivationRetryCoordinator, createLatestActivationCoordinator };

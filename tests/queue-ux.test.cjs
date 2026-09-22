@@ -5,6 +5,7 @@ const test = require("node:test");
 
 const {
   PLAYED_ROW_HEIGHT,
+  createQueueItemPressHandler,
   createQueuePlaybackControls,
   deriveQueueTimeline,
   getQueueInitialOffset,
@@ -63,6 +64,21 @@ test("queue timeline composes played, current, then upcoming in chronological or
   );
   assert.equal(timeline.played.at(-1).trackId, "c");
   assert.equal(timeline.current.trackId, "d");
+});
+
+test("Queue timeline displays all thirty logical successors", () => {
+  const upcoming = Array.from({ length: 30 }, (_, index) => ({
+    id: `item-${index}`,
+    trackId: `track-${index}`,
+    context: { type: "recommendation", label: "Recommended" },
+  }));
+  const tracksById = Object.fromEntries(upcoming.map((item) => [
+    item.trackId,
+    { id: item.trackId, title: item.trackId, artists: ["Artist"], hasMedia: true },
+  ]));
+  const timeline = deriveQueueTimeline({ queueEntries: upcoming, tracksById });
+  assert.equal(timeline.upcoming.length, 30);
+  assert.deepEqual(timeline.upcoming.map((item) => item.id), upcoming.map((item) => item.id));
 });
 
 test("deriving the queue is read-only and keeps timeline roles separate", () => {
@@ -129,6 +145,37 @@ test("queue header delegates Play/Pause to the existing player toggle", () => {
   });
   controls.togglePlayback();
   assert.equal(calls, 1);
+});
+
+test("upcoming Queue row press starts its exact queue item in the existing context", async () => {
+  const existingContext = { type: "liked_songs", label: "Liked Songs" };
+  const selected = { id: "entry-middle", trackId: "middle", context: existingContext };
+  const calls = [];
+  const handlePlay = createQueueItemPressHandler((...args) => {
+    calls.push(args);
+    return Promise.resolve(true);
+  }, { type: "manual_queue", label: "Queue" });
+  assert.equal(await handlePlay(selected), true);
+  assert.deepEqual(calls, [["middle", existingContext, "entry-middle"]]);
+
+  const queueScreen = readFileSync(join(process.cwd(), "src/features/queue/QueueScreen.js"), "utf8");
+  const rows = readFileSync(join(process.cwd(), "src/features/queue/DraggableQueueList.js"), "utf8");
+  assert.match(queueScreen, /createQueueItemPressHandler\(playQueued, playbackContext\)/);
+  assert.match(queueScreen, /onPlay=\{handlePlay\}/);
+  assert.match(rows, /<Pressable onPress=\{\(\) => onPlay\(item\)\}/);
+});
+
+test("queued activation confirms play before reporting success without a second projection pass", () => {
+  const source = readFileSync(join(process.cwd(), "src/stores/usePlayerStore.js"), "utf8");
+  const queued = source.slice(source.indexOf("  async playQueued("), source.indexOf("  async toggle()"));
+  assert.match(queued, /const activated = await activate\(/);
+  assert.match(queued, /status\.isPlaying !== true/);
+  assert.doesNotMatch(queued, /await reconcileNativeProjection\(get\)/);
+  assert.ok(queued.indexOf('await persistPlaybackState(get(), "replace")') <
+    queued.indexOf("void get().ensureQueueDepth()"));
+  const activation = source.slice(source.indexOf("async function activate("), source.indexOf("function createQueueEntries"));
+  assert.ok(activation.indexOf("await audioEngine.waitUntilPlaying?.(generation)") <
+    activation.indexOf("commitAndTakeProjectionRequest"));
 });
 
 test("a deliberate upward player gesture opens the existing queue route", () => {

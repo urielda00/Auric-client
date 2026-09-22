@@ -13,6 +13,7 @@ import { useLibraryStore } from '../../stores/useLibraryStore';
 import { colors } from '../../constants/theme';
 
 const { createLatestSearchRunner } = require('../../services/latestSearch.cjs');
+const { playTrackFromList } = require('../../services/pressInteraction.cjs');
 const DEFAULT_RECENTS = ['émile', 'harbour', 'vela', 'marble dust', 'cassette'];
 const SEARCH_DEBOUNCE_MS = 300;
 const MIN_QUERY_LENGTH = 2;
@@ -70,7 +71,7 @@ export default function SearchScreen() {
   const handlePlay = useCallback(
     (track) => {
       if (track.hasMedia === false) return;
-      playTrackFromContext(track.id, results, { type: 'search', label: 'Search' });
+      playTrackFromList({ track, tracks: results, context: { type: 'search', label: 'Search' }, playTrackFromContext });
       searchService.addRecentSearch(query).then(setRecents);
     },
     [playTrackFromContext, query, results],

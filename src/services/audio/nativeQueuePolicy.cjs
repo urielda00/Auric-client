@@ -1,4 +1,8 @@
-const NATIVE_PRELOAD_COUNT = 3;
+// iOS uses this window when auto preloading is eligible. On Android the
+// installed @rntp/player 5.7 treats any positive value as a switch for
+// ExoPlayer's immediate-next-item preload. It cannot guarantee two buffered
+// successors, and this setting does not limit the native queue projection.
+const NATIVE_PRELOAD_COUNT = 2;
 
 function buildNativeProjection({
   current,

@@ -13,6 +13,7 @@ import { usePlayerStore } from '../../stores/usePlayerStore';
 import { useMeasuredHeight } from '../../hooks/useMeasuredHeight';
 import { useMiniPlayerBottomInset } from '../../hooks/useBottomContentInset';
 import { colors } from '../../constants/theme';
+const { playTrackFromList } = require('../../services/pressInteraction.cjs');
 
 export default function HistoryScreen() {
   const history = useLibraryStore((s) => s.history);
@@ -78,12 +79,12 @@ export default function HistoryScreen() {
                   liked={likedIds.includes(entry.trackId)}
                   unavailable={entry.track.hasMedia === false}
                   showNextPill
-                  onPress={() => playTrackFromContext(
-                    entry.trackId,
-                    historyTracks,
-                    { type: 'history', label: 'History' },
-                    historyItems.findIndex((item) => item.entryId === entry.entryId),
-                  )}
+                  onPress={() => playTrackFromList({
+                    track: entry.track, tracks: historyTracks,
+                    context: { type: 'history', label: 'History' },
+                    index: historyItems.findIndex((item) => item.entryId === entry.entryId),
+                    playTrackFromContext,
+                  })}
                   onPlayNext={() => enqueueNext(entry.trackId)}
                   onToggleLike={() => toggleLike(entry.trackId)}
                 />

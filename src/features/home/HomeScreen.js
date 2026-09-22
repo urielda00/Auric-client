@@ -17,13 +17,17 @@ import SmartShuffleBanner from "./SmartShuffleBanner";
 
 const {
   createLatestRequestGate,
+  freshQuickPicksSeed,
 } = require("../../services/recommendationApi.cjs");
 const { getLocalGreeting } = require("./getLocalGreeting.cjs");
+const { playTrackFromList } = require("../../services/pressInteraction.cjs");
+
+const pickIds = (data) => [...(data?.cards || []), ...(data?.rows || [])].map((item) => item.track.id);
 
 export default function HomeScreen() {
   const router = useRouter();
   const [picks, setPicks] = useState(null);
-  const [seed, setSeed] = useState(0);
+  const seedRef = useRef(0);
   const [refreshing, setRefreshing] = useState(false);
   const [picksStatus, setPicksStatus] = useState("idle");
   const [stats, setStats] = useState(null);
@@ -34,19 +38,26 @@ export default function HomeScreen() {
   const toggleLike = useLibraryStore((state) => state.toggleLike);
   const tracksHydrated = useLibraryStore((state) => state.hydrated);
 
-  const loadPicks = useCallback(async (nextSeed) => {
+  const loadPicks = useCallback(async (nextSeed, { freshOnly = false, excludeTrackIds = [] } = {}) => {
     const generation = requestGate.current.begin();
     activeRequest.current?.abort();
     const controller = new AbortController();
     activeRequest.current = controller;
+    if (typeof __DEV__ !== "undefined" && __DEV__) console.debug("[AuricHome] refresh request", { seed: nextSeed, freshOnly, excludeTrackIds });
     setPicksStatus((status) =>
       status === "idle" || status === "error" ? "loading" : status,
     );
     try {
       const data = await recommendationService.getQuickPicks(nextSeed, {
         signal: controller.signal,
+        freshOnly,
+        excludeTrackIds,
       });
-      if (!requestGate.current.isCurrent(generation)) return;
+      if (typeof __DEV__ !== "undefined" && __DEV__) console.debug("[AuricHome] refresh response", { seed: nextSeed, cached: data.cached, trackIds: pickIds(data) });
+      if (!requestGate.current.isCurrent(generation)) {
+        if (typeof __DEV__ !== "undefined" && __DEV__) console.debug("[AuricHome] response ignored", { seed: nextSeed, reason: "stale request" });
+        return;
+      }
       useLibraryStore
         .getState()
         .cacheTracks([
@@ -55,7 +66,11 @@ export default function HomeScreen() {
         ]);
       setPicks(data);
       setPicksStatus(data.cached ? "cached" : "success");
-    } catch {
+    } catch (error) {
+      if (typeof __DEV__ !== "undefined" && __DEV__) console.debug("[AuricHome] refresh failed", { seed: nextSeed, code: error?.code || error?.message });
+      if (typeof __DEV__ !== "undefined" && __DEV__ && error?.status === 422 && excludeTrackIds.length) {
+        console.error("[AuricHome] server rejected refresh exclusions; check deployed recommendation contract", { seed: nextSeed, status: error.status, excludedIds: excludeTrackIds });
+      }
       if (
         requestGate.current.isCurrent(generation) &&
         !controller.signal.aborted
@@ -64,6 +79,12 @@ export default function HomeScreen() {
       }
     }
   }, []);
+
+  useEffect(() => {
+    if (typeof __DEV__ !== "undefined" && __DEV__ && picks) {
+      console.debug("[AuricHome] visible picks committed", { trackIds: pickIds(picks) });
+    }
+  }, [picks]);
 
   useEffect(() => {
     const gate = requestGate.current;
@@ -86,7 +107,9 @@ export default function HomeScreen() {
           setPicksStatus("cached");
         }
         if (cachedStats) setStats(cachedStats);
-        void loadPicks(seed);
+        const nextSeed = freshQuickPicksSeed(seedRef.current);
+        seedRef.current = nextSeed;
+        void loadPicks(nextSeed, { freshOnly: true, excludeTrackIds: pickIds(cachedPicks) });
         void statsService
           .getStats()
           .then((freshStats) => {
@@ -100,27 +123,29 @@ export default function HomeScreen() {
       gate.invalidate();
       activeRequest.current?.abort();
     };
-    // The first load deliberately uses the initial seed only.
+    // Load a new server set after showing any cached picks.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tracksHydrated]);
 
   const handleRefresh = useCallback(async () => {
+    if (typeof __DEV__ !== "undefined" && __DEV__) console.debug("[AuricHome] refresh fired", { currentIds: pickIds(picks) });
     setRefreshing(true);
-    const nextSeed = seed + 1;
-    setSeed(nextSeed);
+    const nextSeed = freshQuickPicksSeed(seedRef.current);
+    seedRef.current = nextSeed;
     try {
-      await loadPicks(nextSeed);
+      await loadPicks(nextSeed, { freshOnly: true, excludeTrackIds: pickIds(picks) });
     } finally {
       setRefreshing(false);
     }
-  }, [seed, loadPicks]);
+  }, [loadPicks, picks]);
 
   const handlePlay = useCallback(
-    (track) => playTrackFromContext(
-      track.id,
-      [...(picks?.cards || []), ...(picks?.rows || [])].map((item) => item.track),
-      { type: "quick_pick", label: "Quick Picks" },
-    ),
+    (track) => playTrackFromList({
+      track,
+      tracks: [...(picks?.cards || []), ...(picks?.rows || [])].map((item) => item.track),
+      context: { type: "quick_pick", label: "Quick Picks" },
+      playTrackFromContext,
+    }),
     [playTrackFromContext, picks],
   );
   const bottomInset = useTabBarBottomInset();
@@ -147,7 +172,7 @@ export default function HomeScreen() {
         <QuickPicksSection
           picks={picks}
           status={picksStatus}
-          onRetry={() => loadPicks(seed)}
+          onRetry={handleRefresh}
           likedIds={likedIds}
           onPlay={handlePlay}
           onToggleLike={toggleLike}

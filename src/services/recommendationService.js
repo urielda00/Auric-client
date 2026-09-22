@@ -106,9 +106,9 @@ function weightedSample(candidates, count) {
 export const recommendationService = {
   isServerBacked: remote !== null,
 
-  async getQuickPicks(seed = 0, { signal } = {}) {
+  async getQuickPicks(seed = 0, { signal, freshOnly = false, excludeTrackIds = [] } = {}) {
     if (!remote) return mockQuickPicks(seed);
-    const result = await quickPicksLoader.load({ seed, signal });
+    const result = await quickPicksLoader.load({ seed, signal, freshOnly, excludeTrackIds });
     const picks = Array.isArray(result.value)
       ? layout(result.value)
       : result.value;

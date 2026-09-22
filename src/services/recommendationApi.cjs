@@ -50,13 +50,24 @@ function mapGeneratedQueue(value) {
 
 function createRecommendationApi(client) {
   return {
-    async quickPicks({ seed, signal } = {}) {
-      const response = await client.get("/api/v1/recommendations/quick-picks", {
-        query: seed === undefined ? undefined : { seed },
+    async quickPicks({ seed, signal, excludeTrackIds = [] } = {}) {
+      const path = "/api/v1/recommendations/quick-picks";
+      const query = {
+        ...(seed === undefined ? {} : { seed }),
+        ...(excludeTrackIds.length ? { exclude_track_ids: excludeTrackIds.join(",") } : {}),
+      };
+      if (typeof __DEV__ !== "undefined" && __DEV__) {
+        console.debug("[AuricHome] network GET", { path, query });
+      }
+      const response = await client.get(path, {
+        query,
         signal,
       });
       if (!Array.isArray(response.data))
         throw new Error("Invalid Quick Picks response");
+      if (typeof __DEV__ !== "undefined" && __DEV__) {
+        console.debug("[AuricHome] network IDs", response.data.map((item) => item.track?.id));
+      }
       return response.data.map(mapQuickPick);
     },
     async smartShuffle({ count = 30, excludeTrackIds = [], signal } = {}) {
@@ -122,10 +133,16 @@ function createLatestRequestGate() {
   };
 }
 
+function freshQuickPicksSeed(previous, random = Math.random) {
+  const candidate = Math.floor(random() * 0x1_0000_0000) >>> 0;
+  return candidate === previous ? (candidate + 1) >>> 0 : candidate;
+}
+
 module.exports = {
   createLatestRequestGate,
   createRecommendationApi,
   createRecommendationRequestCoordinator,
+  freshQuickPicksSeed,
   mapGeneratedQueue,
   mapQuickPick,
 };

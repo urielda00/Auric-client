@@ -34,6 +34,7 @@ import { joinArtists, trackDisplayTitle } from "../../utils/format";
 
 const {
   PLAYED_ROW_HEIGHT,
+  createQueueItemPressHandler,
   createQueuePlaybackControls,
   deriveQueueTimeline,
 } = require("./queueTimeline.cjs");
@@ -102,10 +103,8 @@ export default function QueueScreen() {
     return () => task.cancel();
   }, []);
 
-  const handlePlay = useCallback(
-    (item) => {
-      playQueued(item.trackId, item.context || playbackContext, item.id);
-    },
+  const handlePlay = useMemo(
+    () => createQueueItemPressHandler(playQueued, playbackContext),
     [playQueued, playbackContext],
   );
 

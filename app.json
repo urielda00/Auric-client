@@ -40,7 +40,8 @@
       "./plugins/withAndroidCleartextTraffic",
       "expo-secure-store",
       "expo-font",
-      "expo-asset"
+      "expo-asset",
+      "expo-splash-screen"
     ],
     "experiments": {
       "typedRoutes": false

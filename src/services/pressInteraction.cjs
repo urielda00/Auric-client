@@ -32,8 +32,25 @@ function createExclusivePressHandlers({ onPress, onLongPress }) {
   };
 }
 
+function playTrackFromList({ track, tracks, context, index, playTrackFromContext }) {
+  if (!canOfferTrackActions(track)) return false;
+  const selectedIndex = Number.isInteger(index)
+    ? index
+    : tracks.findIndex((item) => (typeof item === "string" ? item : item?.id) === track.id);
+  if (typeof __DEV__ !== "undefined" && __DEV__) {
+    console.debug("[AuricPlayback] track tap", {
+      trackId: track.id,
+      context: context.type,
+      selectedIndex,
+      sourceSize: tracks.length,
+    });
+  }
+  return playTrackFromContext(track.id, tracks, context, selectedIndex);
+}
+
 module.exports = {
   canOfferTrackActions,
   createExclusivePressHandlers,
+  playTrackFromList,
   performPlayNextAction,
 };

@@ -18,6 +18,7 @@ const {
   createCheckpointGate,
 } = require("../src/services/audio/checkpointPolicy.cjs");
 const {
+  createActivationRetryCoordinator,
   createLatestActivationCoordinator,
 } = require("../src/services/audio/latestActivationCoordinator.cjs");
 
@@ -297,21 +298,19 @@ test("background persistence reconciles known local successors before flushing s
   assert.doesNotMatch(source.slice(0, source.indexOf("async function activate")), /QueueScreen/);
 });
 
-test("successful activation always verifies the latest native projection", () => {
+test("activation verifies native load and playback before committing the logical selection", () => {
   const source = readFileSync(
     join(process.cwd(), "src/stores/usePlayerStore.js"),
     "utf8",
   );
-  const commitStart = source.indexOf(
-    "const committed = activations.commitAndTakeProjectionRequest",
-  );
-  const activationCommit = source.slice(
-    commitStart,
-    source.indexOf("listeningTracker.handleStatus", commitStart),
-  );
-  assert.match(activationCommit, /if \(!committed\.committed\) return false;/);
-  assert.match(activationCommit, /await syncNativeProjection\(get\);/);
-  assert.doesNotMatch(activationCommit, /if \(committed\.projectionRequested\)/);
+  const activation = source.slice(source.indexOf("async function activate("), source.indexOf("function createQueueEntries"));
+  const loaded = activation.indexOf("const loadedNative = audioEngine.getNativePlaybackSnapshot?.()");
+  const confirmed = activation.indexOf("const confirmedNative = audioEngine.getNativePlaybackSnapshot?.()");
+  const queueCommit = activation.indexOf("replaceEntries(upcomingEntries");
+  const selectionCommit = activation.indexOf("setPlayback(set, get, () => ({");
+  assert.ok(loaded > 0 && loaded < confirmed && confirmed < queueCommit && queueCommit < selectionCommit);
+  assert.match(activation, /confirmedNative\?\.nativeActiveMediaId !== nextItemId/);
+  assert.match(activation, /confirmedNative\?\.nativeIsPlaying !== true/);
 });
 
 test("context activation reasserts Play after native readiness", () => {
@@ -329,6 +328,34 @@ test("context activation reasserts Play after native readiness", () => {
   );
   assert.ok(firstPlay >= 0 && firstPlay < ready);
   assert.ok(ready < secondPlay);
+});
+
+test("context activation confirms playing before storing its final playback state", () => {
+  const source = readFileSync(join(process.cwd(), "src/stores/usePlayerStore.js"), "utf8");
+  const activation = source.slice(source.indexOf("async function activate("), source.indexOf("function createQueueEntries"));
+  const confirmed = activation.indexOf("await audioEngine.waitUntilPlaying?.(generation)");
+  const finalStatus = activation.indexOf("let nativeStatus = audioEngine.getStatus()");
+  const stored = activation.indexOf("isPlaying: true,");
+  assert.ok(confirmed > 0 && confirmed < finalStatus && finalStatus < stored);
+  assert.match(activation, /nativeStatus\.itemId !== nextItemId \|\| nativeStatus\.isPlaying !== true/);
+});
+
+test("late local hydration cannot reset a newer playback selection to paused", () => {
+  const source = readFileSync(join(process.cwd(), "src/stores/usePlayerStore.js"), "utf8");
+  const hydration = source.slice(source.indexOf("async hydrate("), source.indexOf("async handleNativeTrackChanged("));
+  assert.match(hydration, /isGenerationCurrent\(localHydration\.generation\)/);
+  assert.match(hydration, /!activations\.hasUncommittedSelection\(\)/);
+  assert.match(hydration, /set\(\{ hydrated: true \}\)/);
+  assert.doesNotMatch(hydration, /set\(\{ hydrated: true, isPlaying: false \}\)/);
+});
+
+test("a selected track opens Player only after native playback confirms", () => {
+  const source = readFileSync(join(process.cwd(), "src/stores/usePlayerStore.js"), "utf8");
+  const activation = source.slice(source.indexOf("async function activate("), source.indexOf("function createQueueEntries"));
+  assert.ok(activation.indexOf("await audioEngine.waitUntilPlaying?.(generation)") <
+    activation.indexOf("if (openFullPlayer) notifyExplicitPlaybackSelection(true)"));
+  assert.ok(activation.indexOf("if (openFullPlayer) notifyExplicitPlaybackSelection(true)") <
+    activation.indexOf("} catch (error)"));
 });
 
 test("ordinary track-list taps use context playback", () => {
@@ -541,6 +568,75 @@ test("latest failed selection stays selected, coherent, and retryable", () => {
   assert.deepEqual(harness.effects.ended, ["committed"]);
 });
 
+test("failed new-context retry retains intended queue IDs and empty Previous", () => {
+  const retries = createActivationRetryCoordinator();
+  const oldSession = {
+    current: "A",
+    upcoming: [{ id: "old-B", trackId: "B" }, { id: "old-C", trackId: "C" }],
+    played: [{ id: "old-previous", trackId: "older" }],
+  };
+  const intended = {
+    trackId: "X",
+    itemId: "new-X",
+    context: { type: "search", label: "Search" },
+    upcomingEntries: [
+      { id: "new-Y", trackId: "Y" },
+      { id: "new-Z", trackId: "Z" },
+    ],
+    initialHistory: [],
+    replaceQueueOnStart: true,
+    endPreviousReason: "replaced",
+  };
+  retries.capture(intended);
+  // A failed activation keeps the selected context visible and retryable.
+  const visibleQueueAfterFailure = intended.upcomingEntries;
+  const retry = retries.match("X", "new-X");
+  assert.deepEqual(visibleQueueAfterFailure.map((item) => item.trackId), ["Y", "Z"]);
+  assert.deepEqual(retry.upcomingEntries.map((item) => item.trackId), ["Y", "Z"]);
+  assert.deepEqual(retry.upcomingEntries.map((item) => item.id), ["new-Y", "new-Z"]);
+  assert.deepEqual(retry.initialHistory, []);
+  assert.equal(retry.context.type, "search");
+  assert.equal(retry.replaceQueueOnStart, true);
+  assert.equal(retry.endPreviousReason, "replaced");
+  assert.notEqual(retry.upcomingEntries, intended.upcomingEntries);
+  retries.clear(); // A different selection or a successful activation.
+  assert.equal(retries.match("X", "new-X"), null);
+  assert.equal(oldSession.played.length, 1);
+});
+
+test("retry plan never matches a replacement selection", () => {
+  const retries = createActivationRetryCoordinator();
+  retries.capture({ trackId: "X", itemId: "new-X", upcomingEntries: [], initialHistory: [] });
+  assert.equal(retries.match("other", "new-other"), null);
+  assert.equal(retries.match("X", "different-occurrence"), null);
+  retries.clear();
+  assert.equal(retries.match("X", "new-X"), null);
+});
+
+test("player store wires failed context plans back into Retry and clears them on a new selection", () => {
+  const source = readFileSync(join(process.cwd(), "src/stores/usePlayerStore.js"), "utf8");
+  const retry = source.slice(source.indexOf("  async retry()"), source.indexOf("  async persistNow()"));
+  const activation = source.slice(source.indexOf("async function activate("), source.indexOf("function createQueueEntries"));
+  assert.match(retry, /retryPlans\.match\(track\.id, get\(\)\.currentItemId\)/);
+  assert.match(retry, /\.\.\.\(plan \|\| \{\}\)/);
+  assert.match(activation, /if \(!preserveRetryPlan\) retryPlans\.clear\(\)/);
+  assert.match(activation, /retryPlans\.capture\(\{/);
+  assert.match(activation, /retryPlans\.clear\(\);/);
+});
+
+test("ordinary context and Previous recovery schedule the shared refill coordinator", () => {
+  const source = readFileSync(join(process.cwd(), "src/stores/usePlayerStore.js"), "utf8");
+  const context = source.slice(source.indexOf("  async playTrackFromContext("), source.indexOf("  async playQueued("));
+  const previous = source.slice(source.indexOf("  async previous("), source.indexOf("  async next("));
+  const refill = source.slice(source.indexOf("  ensureQueueDepth(options)"), source.indexOf("async function activate("));
+  assert.match(context, /await get\(\)\.ensureQueueDepth\(\{ force: true \}\)/);
+  assert.ok(context.indexOf('await persistPlaybackState(get(), "replace")') <
+    context.indexOf("await get().ensureQueueDepth({ force: true })"));
+  assert.match(previous, /void get\(\)\.ensureQueueDepth\(\)/);
+  assert.match(refill, /getQueueRefillCoordinator\(\)\.refill\(options\)/);
+  assert.doesNotMatch(refill, /shuffleMode !==/);
+});
+
 test("maps one atomic server snapshot with queue Track metadata and context", () => {
   const snapshot = mapPlaybackSnapshot(dto());
   assert.equal(snapshot.current.trackId, TRACK_DTO.id);
@@ -572,6 +668,24 @@ test("snapshot API sends revisions, stable queue IDs, and checkpoint Track guard
   assert.equal(calls[1][2].current_track_id, TRACK_DTO.id);
   assert.equal(calls[1][2].position_ms, 2222);
   assert.deepEqual(snapshotBody(snapshot, 4).current.context, CONTEXT);
+});
+
+test("playback state GET, replace, and checkpoint use the single versioned API path", async () => {
+  const paths = [];
+  const client = {
+    async get(path) { paths.push(["GET", path]); return { data: dto() }; },
+    async put(path) { paths.push(["PUT", path]); return { data: dto() }; },
+    async patch(path) { paths.push(["PATCH", path]); return { data: dto() }; },
+  };
+  const api = createPlaybackStateApi(client);
+  await api.get();
+  await api.replace(mapPlaybackSnapshot(dto()), 4);
+  await api.checkpoint({ currentTrackId: TRACK_DTO.id, positionMs: 1000 }, 4);
+  assert.deepEqual(paths, [
+    ["GET", "/api/v1/playback-state"],
+    ["PUT", "/api/v1/playback-state"],
+    ["PATCH", "/api/v1/playback-state/checkpoint"],
+  ]);
 });
 
 test("hydrates from the server and keeps the local snapshot only as fallback", async () => {
@@ -751,11 +865,12 @@ test("serializes Play Next, reorder, remove, Next, Previous, and completion snap
   const reorder = { ...playNext, upcoming: [...playNext.upcoming].reverse() };
   const remove = { ...playNext, upcoming: [] };
   const next = localSnapshot({
-    current: { trackId: SECOND_DTO.id, context: CONTEXT },
+    current: { id: "next-item", trackId: SECOND_DTO.id, context: CONTEXT },
     played: [{ id: ITEM_ID, trackId: TRACK_DTO.id, context: CONTEXT }],
   });
   const previous = localSnapshot({
     current: {
+      id: "previous-item",
       trackId: TRACK_DTO.id,
       context: { type: "direct", label: "Previous" },
     },
@@ -765,9 +880,11 @@ test("serializes Play Next, reorder, remove, Next, Previous, and completion snap
     coordinator.replace(playNext),
     coordinator.replace(reorder),
     coordinator.replace(remove),
-    coordinator.replace(next),
-    coordinator.replace(previous),
   ]);
+  coordinator.markLocalChange();
+  await coordinator.replace(next);
+  coordinator.markLocalChange();
+  await coordinator.replace(previous);
   assert.deepEqual(
     writes.map((write) => write.revision),
     [0, 1, 2, 3, 4],
@@ -776,9 +893,8 @@ test("serializes Play Next, reorder, remove, Next, Previous, and completion snap
   assert.equal(writes.at(-1).snapshot.current.context.label, "Previous");
 });
 
-test("refetches on revision conflict and does not overwrite newer server state", async () => {
+test("a revision conflict refreshes metadata without restoring the server selection", async () => {
   const newer = { ...localSnapshot(), revision: 9, positionMs: 9000 };
-  const applied = [];
   const coordinator = createPlaybackSyncCoordinator({
     enabled: true,
     storage: memoryStorage(localSnapshot()),
@@ -792,10 +908,8 @@ test("refetches on revision conflict and does not overwrite newer server state",
     },
   });
   await coordinator.hydrate();
-  coordinator.setConflictHandler((snapshot) => applied.push(snapshot));
   await assert.rejects(coordinator.replace(localSnapshot({ positionMs: 2 })));
-  assert.equal(applied[0].revision, 9);
-  assert.equal(applied[0].positionMs, 9000);
+  assert.equal(coordinator.revision, 9);
 });
 
 test("a stale old-Track checkpoint cannot overwrite a newly selected Track", async () => {
@@ -844,11 +958,100 @@ test("a stale old-Track checkpoint cannot overwrite a newly selected Track", asy
     positionMs: 0,
   });
   await coordinator.replace(replacement);
-  await assert.rejects(
-    coordinator.checkpoint(localSnapshot({ positionMs: 90000 })),
-  );
+  assert.equal(await coordinator.checkpoint(localSnapshot({ positionMs: 90000 })), null);
   assert.equal(server.current.trackId, SECOND_DTO.id);
   assert.equal(storage.value().current.trackId, SECOND_DTO.id);
+});
+
+test("an in-flight A checkpoint conflict cannot restore A after queue activation commits B", async () => {
+  let server = localSnapshot();
+  const storage = memoryStorage(server);
+  let rejectCheckpoint;
+  let checkpointStarted;
+  const started = new Promise((resolve) => { checkpointStarted = resolve; });
+  const conflict = () => Object.assign(new Error("conflict"), {
+    code: "PLAYBACK_STATE_CONFLICT",
+  });
+  const coordinator = createPlaybackSyncCoordinator({
+    enabled: true,
+    storage,
+    api: {
+      async get() { return server; },
+      async replace(snapshot, revision) {
+        if (revision !== server.revision) throw conflict();
+        server = { ...snapshot, revision: revision + 1 };
+        return server;
+      },
+      checkpoint() {
+        checkpointStarted();
+        return new Promise((_, reject) => { rejectCheckpoint = reject; });
+      },
+    },
+  });
+  await coordinator.hydrate();
+  const oldCheckpoint = coordinator.checkpoint(localSnapshot({ positionMs: 20000 }));
+  await started;
+  coordinator.markLocalChange();
+  const trackB = localSnapshot({
+    current: { id: "queue-item-B", trackId: SECOND_DTO.id, context: CONTEXT },
+    positionMs: 0,
+  });
+  const replacement = coordinator.replace(trackB);
+  server = { ...server, revision: 1 };
+  rejectCheckpoint(conflict());
+  assert.equal(await oldCheckpoint, null);
+  await replacement;
+  assert.equal(server.current.trackId, SECOND_DTO.id);
+  assert.equal(storage.value().current.trackId, SECOND_DTO.id);
+});
+
+test("legacy recommendation contexts are valid in persisted playback snapshots", () => {
+  const recommended = { type: "recommendation", label: "Recommended" };
+  const snapshot = localSnapshot({
+    current: { id: CURRENT_ITEM_ID, trackId: TRACK_DTO.id, context: recommended },
+    upcoming: [{ id: ITEM_ID, trackId: SECOND_DTO.id, context: recommended }],
+    played: [{ id: "028f0000-0000-7000-8000-000000000003", trackId: SECOND_DTO.id, context: recommended }],
+  });
+  const body = snapshotBody(snapshot, 0);
+  assert.equal(body.current.context.type, "smart_shuffle");
+  assert.equal(body.upcoming[0].context.type, "smart_shuffle");
+  assert.equal(body.played[0].context.type, "smart_shuffle");
+  assert.equal(body.current.context.label, "Recommended");
+});
+
+test("a 422 B replace leaves B local and a later checkpoint conflict repairs server B", async () => {
+  let server = localSnapshot({ revision: 1 });
+  const storage = memoryStorage(server);
+  let rejectFirstReplace = true;
+  const coordinator = createPlaybackSyncCoordinator({
+    enabled: true,
+    storage,
+    api: {
+      async get() { return server; },
+      async replace(snapshot, revision) {
+        if (rejectFirstReplace) {
+          rejectFirstReplace = false;
+          throw Object.assign(new Error("invalid queue context"), { status: 422 });
+        }
+        assert.equal(revision, server.revision);
+        server = { ...snapshot, revision: revision + 1 };
+        return server;
+      },
+      async checkpoint() {
+        throw Object.assign(new Error("conflict"), { code: "PLAYBACK_STATE_CONFLICT" });
+      },
+    },
+  });
+  await coordinator.hydrate();
+  coordinator.markLocalChange();
+  const trackB = localSnapshot({
+    current: { id: "queue-item-B", trackId: SECOND_DTO.id, context: CONTEXT },
+    positionMs: 0,
+  });
+  await assert.rejects(coordinator.replace(trackB), /invalid queue context/);
+  assert.equal(storage.value().current.trackId, SECOND_DTO.id);
+  assert.equal((await coordinator.checkpoint({ ...trackB, positionMs: 20000 })).current.trackId, SECOND_DTO.id);
+  assert.equal(server.current.trackId, SECOND_DTO.id);
 });
 
 test("mock mode remains local and never requires an API", async () => {

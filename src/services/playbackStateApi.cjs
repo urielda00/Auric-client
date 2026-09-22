@@ -62,10 +62,13 @@ function mapPlaybackSnapshot(dto) {
 }
 
 function snapshotBody(snapshot, expectedRevision) {
+  const context = (value) => value?.type === "recommendation"
+    ? { ...value, type: "smart_shuffle" }
+    : value;
   const item = (entry) => ({
     id: entry.id,
     track_id: entry.trackId,
-    context: entry.context,
+    context: context(entry.context),
   });
   return {
     expected_revision: expectedRevision,
@@ -73,7 +76,7 @@ function snapshotBody(snapshot, expectedRevision) {
       ? {
           id: snapshot.current.id,
           track_id: snapshot.current.trackId,
-          context: snapshot.current.context,
+          context: context(snapshot.current.context),
         }
       : null,
     position_ms: snapshot.current ? snapshot.positionMs : 0,

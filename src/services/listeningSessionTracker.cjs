@@ -17,6 +17,7 @@ const CONTEXT_MAP = Object.freeze({
   random_shuffle: 'random_shuffle',
   smartShuffle: 'smart_shuffle',
   smart_shuffle: 'smart_shuffle',
+  recommendation: 'smart_shuffle',
   quickPicks: 'quick_pick',
   quick_pick: 'quick_pick',
 });

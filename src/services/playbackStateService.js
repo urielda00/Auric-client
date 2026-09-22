@@ -13,6 +13,11 @@ const api = serverApi ? createPlaybackStateApi(serverApi) : null;
 export const playbackStateService = createPlaybackSyncCoordinator({
   api,
   enabled: apiConfig.useServer,
+  trace: (event, details) => {
+    if (typeof __DEV__ !== "undefined" && __DEV__) {
+      console.debug("[AuricPlaybackPersistence]", { event, timestamp: Date.now(), ...details });
+    }
+  },
   storage: {
     load: async () => {
       const snapshot = await loadJSON(STORAGE_KEYS.playbackSnapshot, null);

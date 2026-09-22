@@ -393,7 +393,7 @@ test("Track Player adapter configures native queue, media controls, and real sta
   });
 
   assert.deepEqual(player.queue.map((item) => item.mediaId), ["item-1", "item-2"]);
-  assert.equal(player.calls[0][1].cache.preloading.window, 3);
+  assert.equal(player.calls[0][1].cache.preloading.window, 2);
   assert.deepEqual(player.calls[1][1].capabilities, [
     "previous",
     "playPause",
@@ -417,6 +417,105 @@ test("Track Player adapter configures native queue, media controls, and real sta
     itemId: "item-1",
     generation: 1,
   });
+});
+
+test("Android queue acceptance polls without repeatedly restarting preparation", async () => {
+  const player = createFakeTrackPlayer();
+  const apply = player.setMediaItems.bind(player);
+  let setCount = 0;
+  player.setMediaItems = (...args) => {
+    setCount += 1;
+    setTimeout(() => apply(...args), 90);
+  };
+  const engine = new TrackPlayerAudioEngineCore({
+    player,
+    createSource: (track) => ({ uri: `https://auric.test/${track.id}` }),
+  });
+  await engine.load(PLAYABLE_TRACK, { currentItemId: "item-delayed" });
+  assert.equal(setCount, 1);
+  assert.equal(player.getActiveMediaItem().mediaId, "item-delayed");
+});
+
+test("context autoplay confirms native playing after delayed Android play commands", async () => {
+  const player = createFakeTrackPlayer();
+  let playRequests = 0;
+  player.play = function delayedPlay() {
+    playRequests += 1;
+    this.calls.push(["play"]);
+    if (playRequests >= 3) {
+      this.playing = true;
+      this.emit(EVENT.IS_PLAYING, { playing: true });
+    }
+  };
+  const engine = new TrackPlayerAudioEngineCore({
+    player,
+    createSource: (track) => ({ uri: `https://auric.test/${track.id}` }),
+  });
+  let finalStorePlaying = false;
+  engine.setOnStatus((status) => { finalStorePlaying = status.isPlaying; });
+  const generation = engine.beginActivation();
+  await engine.load(PLAYABLE_TRACK, {
+    currentItemId: "selected-item",
+    activationGeneration: generation,
+    upcoming: [{ itemId: "next-item", track: { ...PLAYABLE_TRACK, id: "next" } }],
+  });
+  engine.play(generation);
+  player.emit(EVENT.PLAYBACK_STATE, { state: "ready" });
+  await engine.waitUntilReady(generation);
+  engine.play(generation);
+  assert.equal(engine.getStatus().isPlaying, false);
+  await engine.waitUntilPlaying(generation, 1000);
+  finalStorePlaying = engine.getStatus().isPlaying;
+  assert.equal(finalStorePlaying, true);
+  assert.equal(player.getActiveMediaItem().mediaId, "selected-item");
+  assert.equal(playRequests, 3);
+});
+
+test("replacement load waits for the exact native active item before it can play", async () => {
+  const player = createFakeTrackPlayer();
+  const engine = new TrackPlayerAudioEngineCore({
+    player,
+    createSource: (track) => ({ uri: `https://auric.test/${track.id}` }),
+    queueAcceptanceTimeoutMs: 500,
+  });
+  await engine.load(PLAYABLE_TRACK, { currentItemId: "item-A" });
+  engine.play();
+  const oldActive = player.getActiveMediaItem();
+  const readActive = player.getActiveMediaItem.bind(player);
+  let adopted = false;
+  player.getActiveMediaItem = () => adopted ? readActive() : oldActive;
+  setTimeout(() => { adopted = true; }, 75);
+
+  const generation = engine.beginActivation();
+  const loaded = await engine.load({ ...PLAYABLE_TRACK, id: "track-B" }, {
+    currentItemId: "item-B",
+    activationGeneration: generation,
+  });
+  assert.equal(loaded, generation);
+  assert.equal(player.getActiveMediaItem().mediaId, "item-B");
+  engine.play(generation);
+  player.emit(EVENT.PLAYBACK_STATE, { state: "ready" });
+  assert.equal(await engine.waitUntilPlaying(generation, 500), true);
+  assert.equal(engine.getNativePlaybackSnapshot().nativeActiveMediaId, "item-B");
+  assert.equal(engine.getNativePlaybackSnapshot().nativeIsPlaying, true);
+});
+
+test("context autoplay reports failure instead of committing a permanently paused track", async () => {
+  const player = createFakeTrackPlayer();
+  player.play = function ignoredPlay() { this.calls.push(["play"]); };
+  const engine = new TrackPlayerAudioEngineCore({
+    player,
+    createSource: (track) => ({ uri: `https://auric.test/${track.id}` }),
+  });
+  const generation = engine.beginActivation();
+  await engine.load(PLAYABLE_TRACK, {
+    currentItemId: "selected-item",
+    activationGeneration: generation,
+  });
+  player.emit(EVENT.PLAYBACK_STATE, { state: "ready" });
+  engine.play(generation);
+  await assert.rejects(engine.waitUntilPlaying(generation, 80), /NATIVE_PLAYBACK_DID_NOT_START/);
+  assert.equal(engine.getStatus().isPlaying, false);
 });
 
 test("context playback installs native successors before playback or background controls", async () => {

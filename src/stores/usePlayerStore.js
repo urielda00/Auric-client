@@ -26,6 +26,7 @@ const {
   restorePlaybackSnapshot,
 } = require("../services/audio/playbackRestore.cjs");
 const {
+  createActivationRetryCoordinator,
   createLatestActivationCoordinator,
 } = require("../services/audio/latestActivationCoordinator.cjs");
 const {
@@ -63,14 +64,56 @@ const NATIVE_PROJECTION_ATTEMPTS = 2;
 
 const checkpointGate = createCheckpointGate(CHECKPOINT_INTERVAL_MS);
 const activations = createLatestActivationCoordinator();
+const retryPlans = createActivationRetryCoordinator();
 const recommendationRequests = createRecommendationRequestCoordinator();
 let queueRefillCoordinator = null;
 let localHydration = null;
 let backgroundReconciliation = null;
 let nativeProjectionSync = null;
 let nativeProjectionDirty = false;
+let queueSessionId = null;
 const nextTransitionGate = createTransitionGate();
 const nativeTransitions = createIdempotentTransitionTracker();
+
+function tracePlaybackMutation(source, get, before, {
+  intendedTrackId = null,
+  activationGeneration = null,
+  force = false,
+  details = null,
+} = {}) {
+  if (!isDevelopmentBuild()) return;
+  const after = get();
+  if (!force &&
+    before.currentTrackId === after.currentTrackId &&
+    before.currentItemId === after.currentItemId &&
+    before.isPlaying === after.isPlaying &&
+    before.isBuffering === after.isBuffering &&
+    before.isLoading === after.isLoading) return;
+  const native = audioEngine.getNativePlaybackSnapshot?.();
+  console.debug("[AuricPlayback] state mutation", {
+    source,
+    timestamp: Date.now(),
+    activationGeneration: activationGeneration ?? audioEngine.getStatus().generation,
+    selectionGeneration: playbackStateService.selectionGeneration,
+    queueSessionId,
+    intendedTrackId,
+    beforeTrackId: before.currentTrackId,
+    afterTrackId: after.currentTrackId,
+    beforeItemId: before.currentItemId,
+    afterItemId: after.currentItemId,
+    beforeIsPlaying: before.isPlaying,
+    afterIsPlaying: after.isPlaying,
+    nativeActiveMediaId: native?.nativeActiveMediaId ?? null,
+    nativeIsPlaying: native?.nativeIsPlaying ?? false,
+    details,
+  });
+}
+
+function setPlayback(set, get, patch, source, options) {
+  const before = get();
+  set(patch);
+  tracePlaybackMutation(source, get, before, options);
+}
 
 function contextFor(type, label) {
   return { type, label };
@@ -136,9 +179,6 @@ export const usePlayerStore = create((set, get) => ({
     setQueueProjectionHandler(() => {
       void syncNativeProjection(get);
     });
-    playbackStateService.setConflictHandler((snapshot) =>
-      applyRestoredSnapshot(set, get, snapshot, { loadAudio: false }),
-    );
     audioEngine.setOnStatus((status) => {
       if (
         !isCurrentPlaybackEvent(
@@ -156,14 +196,14 @@ export const usePlayerStore = create((set, get) => ({
       }
       const currentDuration = get().durationMs;
       const hadPlaybackError = Boolean(get().playbackError);
-      set({
+      setPlayback(set, get, {
         positionMs: status.positionMs,
         durationMs: status.durationMs > 0 ? status.durationMs : currentDuration,
         isPlaying: status.isPlaying,
         isBuffering: status.isBuffering,
         isLoading: !status.isLoaded && !status.error,
         playbackError: status.error ? playbackFailureMessage(status.error) : null,
-      });
+      }, "native status", { intendedTrackId: status.trackId, activationGeneration: status.generation });
       const now = Date.now();
       if (
         !activationPending &&
@@ -196,16 +236,32 @@ export const usePlayerStore = create((set, get) => ({
     );
 
     localHydration = await playbackStateService.hydrateLocal();
-    if (localHydration.snapshot) {
+    if (localHydration.snapshot &&
+      playbackStateService.isGenerationCurrent(localHydration.generation) &&
+      !activations.hasUncommittedSelection()) {
       await applyRestoredSnapshot(set, get, localHydration.snapshot, {
         loadAudio: false,
         refillQueue: false,
+        source: "local hydration",
+      });
+    } else if (localHydration.snapshot) {
+      tracePlaybackMutation("stale local hydration skipped", get, get(), {
+        intendedTrackId: localHydration.snapshot.current?.trackId, force: true,
       });
     }
-    set({ hydrated: true, isPlaying: false });
+    set({ hydrated: true });
   },
 
   async handleNativeTrackChanged(event) {
+    const native = audioEngine.getNativePlaybackSnapshot?.();
+    if ((event?.generation != null && !audioEngine.isGenerationCurrent(event.generation)) ||
+      (native?.nativeActiveMediaId && native.nativeActiveMediaId !== event?.itemId)) {
+      tracePlaybackMutation("stale native transition skipped", get, get(), {
+        intendedTrackId: event?.trackId, activationGeneration: event?.generation,
+        force: true, details: { eventItemId: event?.itemId },
+      });
+      return false;
+    }
     const transitionKey = `${(event?.nativeItemIds || []).join(">")}:${
       event?.itemId || "none"
     }`;
@@ -217,6 +273,10 @@ export const usePlayerStore = create((set, get) => ({
       queueEntries: queue.entries,
     });
     if (!transition.accepted) {
+      tracePlaybackMutation("native transition rejected", get, get(), {
+        intendedTrackId: event.trackId, activationGeneration: event.generation,
+        force: true, details: { eventItemId: event.itemId },
+      });
       void syncNativeProjection(get);
       return false;
     }
@@ -225,7 +285,12 @@ export const usePlayerStore = create((set, get) => ({
     const track = useLibraryStore.getState().getTrackById(event.trackId);
     if (!track || !isTrackPlayable(track)) return false;
     activations.invalidate();
+    playbackStateService.markLocalChange();
     if (previous.currentTrackId) {
+      tracePlaybackMutation("listening session end on native transition", get, previous, {
+        intendedTrackId: previous.currentTrackId, force: true,
+        details: { reason: event.reason || "completed" },
+      });
       listeningTracker.end(event.reason || "completed", previous.positionMs);
     }
     const history = appendAdvancedHistory({
@@ -241,7 +306,7 @@ export const usePlayerStore = create((set, get) => ({
       playedItems: previous.playedItems,
       limit: PLAYED_STACK_LIMIT,
     });
-    set((state) => ({
+    setPlayback(set, get, (state) => ({
       currentTrackId: track.id,
       currentItemId: first.id,
       positionMs: 0,
@@ -254,7 +319,7 @@ export const usePlayerStore = create((set, get) => ({
         first.context || contextFor("manual_queue", "Queue"),
       playedStack: history.playedStack,
       playedItems: history.playedItems,
-    }));
+    }), "native track transition", { intendedTrackId: track.id, activationGeneration: event.generation });
     queue.replaceEntries(transition.remaining, {
       persist: false,
       refill: false,
@@ -271,13 +336,25 @@ export const usePlayerStore = create((set, get) => ({
 
   async recoverExhaustedNativeQueue() {
     if (!get().currentTrackId || nextTransitionGate.isPending()) return false;
+    const ownerItemId = get().currentItemId;
+    const ownerSelectionGeneration = playbackStateService.selectionGeneration;
+    const isCurrent = () => get().currentItemId === ownerItemId &&
+      playbackStateService.selectionGeneration === ownerSelectionGeneration &&
+      !activations.hasUncommittedSelection();
     await get().ensureQueueDepth({ emergency: true, force: true });
-    await syncNativeProjection(get);
-    if (!useQueueStore.getState().entries.length) {
-      set({ isPlaying: false, isBuffering: false, isLoading: false });
+    if (!isCurrent()) {
+      tracePlaybackMutation("stale native completion skipped", get, get(), {
+        force: true, details: { ownerItemId, ownerSelectionGeneration },
+      });
       return false;
     }
-    return get().next("completed");
+    await syncNativeProjection(get);
+    if (!isCurrent()) return false;
+    if (!useQueueStore.getState().entries.length) {
+      setPlayback(set, get, { isPlaying: false, isBuffering: false, isLoading: false }, "native queue exhausted");
+      return false;
+    }
+    return get().next("completed", ownerItemId);
   },
 
   reconcileInBackground() {
@@ -295,8 +372,13 @@ export const usePlayerStore = create((set, get) => ({
           ) {
             return applyRestoredSnapshot(set, get, restored.snapshot, {
               loadAudio: false,
+              source: "background reconciliation",
             });
           }
+          if (restored.snapshot) tracePlaybackMutation("stale background reconciliation skipped", get, get(), {
+            intendedTrackId: restored.snapshot.current?.trackId, force: true,
+            details: { source: restored.source },
+          });
           return false;
         }),
     ]);
@@ -326,14 +408,23 @@ export const usePlayerStore = create((set, get) => ({
 
   async playTrackFromContext(trackId, tracks, context, index) {
     const track = useLibraryStore.getState().getTrackById(trackId);
-    if (!track || !isTrackPlayable(track)) return false;
+    if (!track || !isTrackPlayable(track)) {
+      if (isDevelopmentBuild()) console.debug("[AuricPlayback] tap rejected", { trackId, reason: "unplayable" });
+      return false;
+    }
     const selection = buildContextSelection(
       trackId,
       tracks,
       (id) => isTrackPlayable(useLibraryStore.getState().getTrackById(id)),
       index,
     );
-    if (!selection) return false;
+    if (!selection) {
+      if (isDevelopmentBuild()) console.debug("[AuricPlayback] tap rejected", { trackId, index, reason: "missing from context" });
+      return false;
+    }
+    if (isDevelopmentBuild()) console.debug("[AuricPlayback] context entry", { trackId, index, sourceSize: tracks?.length, upcomingSize: selection.upcoming.length, context: context?.type });
+    tracePlaybackMutation("context track tap", get, get(), { intendedTrackId: trackId, force: true,
+      details: { context: context?.type, selectedIndex: index ?? null } });
     const playbackContext = context || contextFor("direct", "Library");
     const upcomingEntries = createQueueEntries(
       selection.upcoming,
@@ -348,25 +439,39 @@ export const usePlayerStore = create((set, get) => ({
       replaceQueueOnStart: true,
       initialHistory: [],
       shuffleModeOnStart: null,
+      newQueueSession: true,
       openFullPlayer: true,
       activationDiagnosticReason: "context activation committed",
     });
     if (activated) {
+      const activatedItemId = get().currentItemId;
       set({ shuffleMode: null, shufflePending: null, shuffleError: null });
-      void persistPlaybackState(get(), "replace");
+      // Recommendations also exclude the server's active queue. Publish this
+      // context first so an old session cannot exhaust the candidate pool.
+      await persistPlaybackState(get(), "replace");
+      if (get().currentItemId === activatedItemId &&
+        !activations.hasUncommittedSelection()) {
+        await get().ensureQueueDepth({ force: true });
+      }
     }
     return activated;
   },
 
   async playQueued(trackId, context, queueItemId) {
     const track = useLibraryStore.getState().getTrackById(trackId);
-    if (!track || !isTrackPlayable(track)) return false;
-    playbackStateService.markLocalChange();
+    if (!track || !isTrackPlayable(track)) {
+      if (isDevelopmentBuild()) console.debug("[AuricPlayback] queue activation failed", { trackId, queueItemId, reason: "unplayable" });
+      return false;
+    }
     const queue = useQueueStore.getState();
     const selectedIndex = queue.entries.findIndex(
       (item) => item.id === queueItemId,
     );
-    if (selectedIndex < 0) return false;
+    if (selectedIndex < 0) {
+      if (isDevelopmentBuild()) console.debug("[AuricPlayback] queue activation failed", { trackId, queueItemId, reason: "item missing" });
+      return false;
+    }
+    playbackStateService.markLocalChange();
     invalidatePendingPlaybackWork(set);
     const upcomingEntries = queue.entries.slice(selectedIndex + 1);
     const previousItems = [
@@ -381,6 +486,9 @@ export const usePlayerStore = create((set, get) => ({
           ]
         : []),
     ].slice(-PLAYED_STACK_LIMIT);
+    if (isDevelopmentBuild()) console.debug("[AuricPlayback] queue activation start", { trackId, queueItemId, selectedIndex, remainingSize: upcomingEntries.length, previousSize: previousItems.length });
+    tracePlaybackMutation("queue item tap", get, get(), { intendedTrackId: trackId, force: true,
+      details: { queueItemId, selectedIndex } });
     const activated = await activate(
       set,
       get,
@@ -393,13 +501,45 @@ export const usePlayerStore = create((set, get) => ({
         upcomingEntries,
         replaceQueueOnStart: true,
         initialHistory: previousItems,
+        activationDiagnosticReason: "playQueued activation committed",
       },
     );
     if (activated) {
-      await reconcileNativeProjection(get);
-      logPlaybackDiagnostic("playQueued activation committed", get);
-      void persistPlaybackState(get(), "replace");
+      // activate already synchronized the native queue and confirmed playback.
+      // A second reconciliation here can race that play.
+      const persisted = await persistPlaybackState(get(), "replace");
+      if (isDevelopmentBuild()) console.debug("[AuricPlayback] queue persistence settled", { queueItemId, accepted: Boolean(persisted), currentItemId: get().currentItemId, revision: playbackStateService.revision });
+      let status = audioEngine.getStatus();
+      if (get().currentItemId !== queueItemId || status.itemId !== queueItemId) {
+        if (isDevelopmentBuild()) console.error("[AuricPlayback] queue activation failed", { trackId, queueItemId, reason: "selection changed", status });
+        return false;
+      }
+      if (status.isPlaying !== true) {
+        if (isDevelopmentBuild()) console.debug("[AuricPlayback] queue play reasserted", { trackId, queueItemId });
+        try {
+          await audioEngine.play(status.generation);
+          await audioEngine.waitUntilPlaying?.(status.generation);
+          status = audioEngine.getStatus();
+        } catch (error) {
+          if (get().currentItemId === queueItemId) setPlayback(set, get,
+            { isPlaying: false, playbackError: playbackFailureMessage(error) },
+            "queue play reassert failed", { intendedTrackId: trackId });
+          if (isDevelopmentBuild()) console.error("[AuricPlayback] queue activation failed", { trackId, queueItemId, code: error?.code || error?.message });
+          return false;
+        }
+      }
+      if (get().currentItemId !== queueItemId || status.itemId !== queueItemId || status.isPlaying !== true) {
+        if (get().currentItemId === queueItemId) setPlayback(set, get,
+          { isPlaying: false, playbackError: playbackFailureMessage() },
+          "queue native confirmation failed", { intendedTrackId: trackId });
+        if (isDevelopmentBuild()) console.error("[AuricPlayback] queue activation failed", { trackId, queueItemId, reason: "native playback not confirmed", status });
+        return false;
+      }
+      if (!get().isPlaying) setPlayback(set, get,
+        { isPlaying: true, playbackError: null }, "queue play confirmed", { intendedTrackId: trackId });
       void get().ensureQueueDepth();
+    } else if (isDevelopmentBuild()) {
+      console.error("[AuricPlayback] queue activation failed", { trackId, queueItemId, reason: "activate returned false" });
     }
     return activated;
   },
@@ -412,10 +552,13 @@ export const usePlayerStore = create((set, get) => ({
     }
     if (get().isPlaying) {
       try {
+        const beforePause = get();
         await audioEngine.pause();
+        tracePlaybackMutation("user pause requested", get, beforePause, { intendedTrackId: beforePause.currentTrackId, force: true });
       } catch {
         listeningTracker.end("error", get().positionMs);
-        set({ playbackError: playbackFailureMessage(), isPlaying: false });
+        setPlayback(set, get, { playbackError: playbackFailureMessage(), isPlaying: false },
+          "user pause failed");
       }
     } else {
       try {
@@ -428,7 +571,8 @@ export const usePlayerStore = create((set, get) => ({
           if (!track || !isTrackPlayable(track)) return;
           const restoredPosition = get().positionMs;
           const expectedTrackId = track.id;
-          set({ isLoading: true, isBuffering: true, playbackError: null });
+          setPlayback(set, get, { isLoading: true, isBuffering: true, playbackError: null },
+            "toggle reload", { intendedTrackId: track.id });
           await audioEngine.load(track, {
             currentItemId: get().currentItemId,
             context: get().playbackContext,
@@ -437,10 +581,13 @@ export const usePlayerStore = create((set, get) => ({
           if (get().currentTrackId !== expectedTrackId) return;
           await audioEngine.seekTo(restoredPosition);
         }
+        const beforePlay = get();
         await audioEngine.play();
+        tracePlaybackMutation("user play requested", get, beforePlay, { intendedTrackId: beforePlay.currentTrackId, force: true });
       } catch {
         listeningTracker.end("error", get().positionMs);
-        set({ playbackError: playbackFailureMessage(), isPlaying: false });
+        setPlayback(set, get, { playbackError: playbackFailureMessage(), isPlaying: false },
+          "user play failed");
       }
     }
     void persistPlaybackState(get(), "checkpoint");
@@ -495,6 +642,7 @@ export const usePlayerStore = create((set, get) => ({
     if (previousAction === "restart-current") {
       await get().seek(0);
       await persistPlaybackState(get(), "replace");
+      void get().ensureQueueDepth();
       return true;
     }
     const previousItem = playedItems[playedItems.length - 1];
@@ -503,6 +651,7 @@ export const usePlayerStore = create((set, get) => ({
     if (!track || !isTrackPlayable(track)) {
       await get().seek(0);
       await persistPlaybackState(get(), "replace");
+      void get().ensureQueueDepth();
       return true;
     }
     const queue = useQueueStore.getState();
@@ -533,6 +682,7 @@ export const usePlayerStore = create((set, get) => ({
     );
     if (!activated) return;
     await persistPlaybackState(get(), "replace");
+    void get().ensureQueueDepth();
     return true;
   },
 
@@ -554,18 +704,21 @@ export const usePlayerStore = create((set, get) => ({
           emergencyRefill: () =>
             get().ensureQueueDepth({ emergency: true, force: true }),
           pauseAtExhaustion: async () => {
+            const beforePause = get();
             await audioEngine.pause();
-            set({ isPlaying: false, isBuffering: false, isLoading: false });
+            tracePlaybackMutation("Next exhausted native pause", get, beforePause, { force: true });
+            setPlayback(set, get, { isPlaying: false, isBuffering: false, isLoading: false },
+              "Next exhausted");
             void persistPlaybackState(get(), "replace");
           },
         });
       } catch (error) {
         if (error?.message === "STALE_ACTIVATION") return false;
-        set({
+        setPlayback(set, get, {
           playbackError: playbackFailureMessage(error),
           isBuffering: false,
           isLoading: false,
-        });
+        }, "Next failed");
         return false;
       }
     });
@@ -608,14 +761,21 @@ export const usePlayerStore = create((set, get) => ({
   async retry() {
     const track = get().getCurrentTrack();
     if (!track || !isTrackPlayable(track)) return;
+    const plan = retryPlans.match(track.id, get().currentItemId);
     const retryingUncommittedSelection =
       activations.hasUncommittedSelection();
-    const activated = await activate(set, get, track, get().playbackContext, {
-      pushCurrentToStack: retryingUncommittedSelection,
-      endPreviousReason: retryingUncommittedSelection ? "replaced" : null,
+    const activated = await activate(set, get, track, plan?.context || get().playbackContext, {
+      pushCurrentToStack: plan ? false : retryingUncommittedSelection,
+      endPreviousReason: plan?.endPreviousReason ||
+        (retryingUncommittedSelection ? "replaced" : null),
       currentItemId: get().currentItemId,
+      ...(plan || {}),
+      preserveRetryPlan: true,
     });
-    if (activated) void persistPlaybackState(get(), "replace");
+    if (activated) {
+      void persistPlaybackState(get(), "replace");
+      void get().ensureQueueDepth();
+    }
   },
 
   async persistNow() {
@@ -628,9 +788,6 @@ export const usePlayerStore = create((set, get) => ({
 
   ensureQueueDepth(options) {
     if (activations.hasUncommittedSelection()) return Promise.resolve(false);
-    if (get().shuffleMode !== "smart" && get().shuffleMode !== "random") {
-      return Promise.resolve(false);
-    }
     return getQueueRefillCoordinator().refill(options);
   },
 }));
@@ -648,85 +805,103 @@ async function activate(
     replaceQueueOnStart = false,
     initialHistory = null,
     shuffleModeOnStart,
+    newQueueSession = false,
+    preserveRetryPlan = false,
     openFullPlayer = false,
     activationDiagnosticReason = null,
   },
 ) {
   if (!isTrackPlayable(track)) return false;
+  if (!preserveRetryPlan) retryPlans.clear();
   const { token, baseline: previous } = activations.begin(() => ({
     ...get(),
     queueEntries: useQueueStore.getState().entries,
   }));
   const nextItemId = currentItemId || generateUuid();
   const nativeUpcoming = nativeEntries(upcomingEntries);
-  const previousQueueEntries = replaceQueueOnStart
-    ? previous.queueEntries
-    : null;
-  set({
-    currentTrackId: track.id,
-    currentItemId: nextItemId,
-    positionMs: 0,
-    durationMs: track.durationMs || 0,
-    isPlaying: false,
-    isBuffering: true,
-    isLoading: true,
-    playbackError: null,
-    playbackContext: context,
-    ...(shuffleModeOnStart !== undefined
-      ? { shuffleMode: shuffleModeOnStart }
-      : {}),
-    ...(initialHistory
-      ? {
-          playedItems: initialHistory,
-          playedStack: initialHistory.map((item) => item.trackId),
-        }
-      : {}),
-  });
-  if (replaceQueueOnStart) {
-    useQueueStore.getState().replaceEntries(upcomingEntries, {
-      persist: false,
-      refill: false,
-    });
-  }
-  if (openFullPlayer) notifyExplicitPlaybackSelection(true);
+  if (isDevelopmentBuild()) console.debug("[AuricPlayback] activation start", { trackId: track.id, itemId: nextItemId, activationSequence: token.sequence, logicalUpcomingBeforeNativeLoad: upcomingEntries.length, nativeSuccessors: nativeUpcoming.length });
   try {
+    const beforeNativeActivation = get();
     const reservedGeneration = audioEngine.beginActivation();
+    tracePlaybackMutation("native activation reserved", get, beforeNativeActivation, {
+      intendedTrackId: track.id, activationGeneration: reservedGeneration, force: true,
+      details: { activationSequence: token.sequence, queueSessionId },
+    });
     if (!activations.attachGeneration(token, reservedGeneration)) return false;
+    if (isDevelopmentBuild()) console.debug("[AuricPlayback] activation generation", { trackId: track.id, itemId: nextItemId, activationSequence: token.sequence, nativeGeneration: reservedGeneration });
     const generation = await audioEngine.load(track, {
       currentItemId: nextItemId,
       context,
       upcoming: nativeUpcoming,
       activationGeneration: reservedGeneration,
     });
+    tracePlaybackMutation("native queue loaded", get, beforeNativeActivation, {
+      intendedTrackId: track.id, activationGeneration: generation, force: true,
+      details: { activationSequence: token.sequence },
+    });
     const isNativeCurrent = (value) =>
       audioEngine.isGenerationCurrent(value);
     if (!activations.isCurrent(token, isNativeCurrent)) return false;
-    if (replaceQueueOnStart) {
-      await playbackStateService.stageLocal(playbackSnapshot(get()));
-      if (!activations.isCurrent(token, isNativeCurrent)) return false;
-    }
+    const loadedNative = audioEngine.getNativePlaybackSnapshot?.();
+    if (isDevelopmentBuild()) console.debug("[AuricPlayback] native queue after load", { trackId: track.id, itemId: nextItemId, mediaIds: loadedNative?.nativeQueueMediaIds, count: loadedNative?.nativeQueueMediaIds?.length, activeId: loadedNative?.nativeActiveMediaId });
+    if (loadedNative?.nativeActiveMediaId !== nextItemId) throw new Error("NATIVE_ACTIVE_ITEM_MISMATCH");
+    if (isDevelopmentBuild()) console.debug("[AuricPlayback] play requested", { trackId: track.id, itemId: nextItemId, nativeGeneration: generation });
     await audioEngine.play(generation);
+    tracePlaybackMutation("native play requested", get, beforeNativeActivation, {
+      intendedTrackId: track.id, activationGeneration: generation, force: true,
+    });
     await audioEngine.waitUntilReady?.(generation);
     if (!activations.isCurrent(token, isNativeCurrent)) return false;
     // Android can accept Play while preparing without starting once Ready.
     // Reassert the same generation after readiness so a track tap always starts.
     await audioEngine.play(generation);
+    await audioEngine.waitUntilPlaying?.(generation);
+    tracePlaybackMutation("native play confirmed", get, beforeNativeActivation, {
+      intendedTrackId: track.id, activationGeneration: generation, force: true,
+    });
+    const confirmedNative = audioEngine.getNativePlaybackSnapshot?.();
+    if (confirmedNative?.nativeActiveMediaId !== nextItemId || confirmedNative?.nativeIsPlaying !== true) {
+      throw new Error("NATIVE_PLAYBACK_DID_NOT_START");
+    }
     if (!activations.isCurrent(token, isNativeCurrent)) return false;
+    if (isDevelopmentBuild()) console.debug("[AuricPlayback] play confirmed", { trackId: track.id, itemId: nextItemId, nativeGeneration: generation, activeId: confirmedNative.nativeActiveMediaId, isPlaying: confirmedNative.nativeIsPlaying });
+    let nativeStatus = audioEngine.getStatus();
+    if (nativeStatus.itemId === nextItemId && nativeStatus.isPlaying !== true) {
+      await audioEngine.waitUntilPlaying?.(generation);
+      nativeStatus = audioEngine.getStatus();
+    }
+    if (!activations.isCurrent(token, isNativeCurrent)) return false;
+    if (nativeStatus.itemId !== nextItemId || nativeStatus.isPlaying !== true) {
+      throw new Error("NATIVE_PLAYBACK_DID_NOT_START");
+    }
     if (previous.currentTrackId && endPreviousReason) {
+      tracePlaybackMutation("listening session end on activation", get, previous, {
+        intendedTrackId: previous.currentTrackId, activationGeneration: generation,
+        force: true, details: { reason: endPreviousReason },
+      });
       listeningTracker.end(endPreviousReason, previous.positionMs);
     }
     nativeTransitions.reset();
-    const nativeStatus = audioEngine.getStatus();
-    set(() => ({
+    if (newQueueSession || !queueSessionId) queueSessionId = generateUuid();
+    if (replaceQueueOnStart) {
+      useQueueStore.getState().replaceEntries(upcomingEntries, {
+        persist: false,
+        refill: false,
+      });
+    }
+    setPlayback(set, get, () => ({
       currentTrackId: track.id,
       currentItemId: nextItemId,
       positionMs: 0,
       durationMs: track.durationMs || 0,
-      isPlaying: nativeStatus.isPlaying,
+      isPlaying: true,
       isBuffering: nativeStatus.isBuffering,
       isLoading: nativeStatus.isLoaded !== true,
       playbackError: null,
       playbackContext: context,
+      ...(shuffleModeOnStart !== undefined
+        ? { shuffleMode: shuffleModeOnStart }
+        : {}),
       playedStack: initialHistory
         ? initialHistory.map((item) => item.trackId)
         : pushCurrentToStack &&
@@ -750,34 +925,47 @@ async function activate(
               },
             ].slice(-PLAYED_STACK_LIMIT)
           : previous.playedItems,
-    }));
+    }), "activation committed", { intendedTrackId: track.id, activationGeneration: generation,
+      details: { activationSequence: token.sequence } });
     const committed = activations.commitAndTakeProjectionRequest(
       token,
       isNativeCurrent,
     );
     if (!committed.committed) return false;
+    retryPlans.clear();
+    if (isDevelopmentBuild()) console.debug("[AuricPlayback] activation committed", { trackId: track.id, itemId: nextItemId, activationSequence: token.sequence, nativeGeneration: generation, queueSize: useQueueStore.getState().entries.length });
     if (activationDiagnosticReason) {
       logPlaybackDiagnostic(activationDiagnosticReason, get);
     }
-    await syncNativeProjection(get);
     listeningTracker.handleStatus(nativeStatus, context);
     checkpointGate.reset(Date.now());
     if (committed.nextRequested && get().currentItemId === nextItemId) {
       await get().next("skipped_next", nextItemId);
     }
+    if (openFullPlayer) notifyExplicitPlaybackSelection(true);
+    if (committed.projectionRequested) void syncNativeProjection(get);
     return true;
   } catch (error) {
     const isNativeCurrent = (value) =>
       audioEngine.isGenerationCurrent(value);
     if (activations.fail(token, isNativeCurrent)) {
-      if (replaceQueueOnStart && get().currentItemId === nextItemId) {
-        useQueueStore.getState().replaceEntries(previousQueueEntries, {
-          persist: false,
-          refill: false,
+      if (newQueueSession) queueSessionId = generateUuid();
+      if (replaceQueueOnStart) {
+        retryPlans.capture({
+          trackId: track.id,
+          itemId: nextItemId,
+          context,
+          upcomingEntries,
+          replaceQueueOnStart: true,
+          initialHistory,
+          shuffleModeOnStart,
+          newQueueSession,
+          endPreviousReason,
         });
-        void playbackStateService.stageLocal(playbackSnapshot(previous));
       }
-      set({
+      // Keep the selected context available to Retry and the Queue screen.
+      // Rolling it back leaves the new selected track paired with the old queue.
+      setPlayback(set, get, {
         currentTrackId: track.id,
         currentItemId: nextItemId,
         positionMs: 0,
@@ -796,7 +984,15 @@ async function activate(
         isBuffering: false,
         isLoading: false,
         playbackError: playbackFailureMessage(error),
-      });
+      }, "activation failed", { intendedTrackId: track.id, activationGeneration: token.generation,
+        details: { activationSequence: token.sequence, code: error?.code || error?.message } });
+      if (replaceQueueOnStart) {
+        useQueueStore.getState().replaceEntries(upcomingEntries, {
+          persist: false,
+          refill: false,
+        });
+      }
+      if (isDevelopmentBuild()) console.error("[AuricPlayback] activation failed", { trackId: track.id, code: error?.code || error?.message, logicalQueueSize: useQueueStore.getState().entries.length, native: audioEngine.getNativePlaybackSnapshot?.() });
     }
     return false;
   }
@@ -941,7 +1137,15 @@ async function syncNativeProjection(get) {
             },
             nativeEntries(useQueueStore.getState().entries),
           )) || changed;
-      } catch {
+        tracePlaybackMutation("native projection synchronized", get, state, {
+          intendedTrackId: state.currentTrackId, force: true,
+          details: { itemId, queueSize: useQueueStore.getState().entries.length },
+        });
+      } catch (error) {
+        tracePlaybackMutation("native projection rejected", get, state, {
+          intendedTrackId: state.currentTrackId, force: true,
+          details: { itemId, code: error?.code || error?.message },
+        });
         // A later queue/native event requests another bounded reconciliation.
       }
       const latest = get();
@@ -984,6 +1188,12 @@ function playbackSnapshot(state) {
 async function persistPlaybackState(state, mode) {
   if (activations.hasUncommittedSelection()) return null;
   const snapshot = playbackSnapshot(state);
+  const ownerSelectionGeneration = playbackStateService.selectionGeneration;
+  tracePlaybackMutation(`persistence ${mode} requested`, usePlayerStore.getState, state, {
+    intendedTrackId: snapshot.current?.trackId,
+    force: true,
+    details: { ownerSelectionGeneration, itemId: snapshot.current?.id },
+  });
   void saveJSON(STORAGE_KEYS.currentTrack, {
     trackId: state.currentTrackId,
     positionMs: state.positionMs,
@@ -991,10 +1201,23 @@ async function persistPlaybackState(state, mode) {
     shuffleMode: state.shuffleMode,
   });
   try {
-    return mode === "checkpoint"
+    const result = mode === "checkpoint"
       ? await playbackStateService.checkpoint(snapshot)
       : await playbackStateService.replace(snapshot);
-  } catch {
+    tracePlaybackMutation(`persistence ${mode} settled`, usePlayerStore.getState, state, {
+      intendedTrackId: snapshot.current?.trackId,
+      force: true,
+      details: { ownerSelectionGeneration, itemId: snapshot.current?.id,
+        accepted: Boolean(result), revision: result?.revision },
+    });
+    return result;
+  } catch (error) {
+    tracePlaybackMutation(`persistence ${mode} rejected`, usePlayerStore.getState, state, {
+      intendedTrackId: snapshot.current?.trackId,
+      force: true,
+      details: { ownerSelectionGeneration, itemId: snapshot.current?.id,
+        code: error?.code, status: error?.status, validation: error?.details },
+    });
     return null;
   }
 }
@@ -1003,16 +1226,27 @@ async function applyRestoredSnapshot(
   set,
   get,
   snapshot,
-  { loadAudio = false, refillQueue = true } = {},
+  { loadAudio = false, refillQueue = true, source = "restore" } = {},
 ) {
+  const before = get();
+  tracePlaybackMutation(`${source} requested`, get, before, {
+    intendedTrackId: snapshot.current?.trackId,
+    force: true,
+    details: { snapshotItemId: snapshot.current?.id, revision: snapshot.revision },
+  });
+  retryPlans.clear();
   activations.invalidate();
   audioEngine.cancelActivation?.();
+  tracePlaybackMutation(`${source} native cancel`, get, before, { intendedTrackId: snapshot.current?.trackId, force: true });
+  queueSessionId = snapshot.current?.id ?? null;
   const restored = await restorePlaybackSnapshot({
     snapshot,
     getTrack: (id) => useLibraryStore.getState().getTrackById(id),
     cacheTracks: (tracks) => useLibraryStore.getState().cacheTracks(tracks),
     hydrateQueue: (items) => useQueueStore.getState().hydrateSnapshot(items),
-    setPlayer: set,
+    setPlayer: (patch) => setPlayback(set, get, patch, source, {
+      intendedTrackId: snapshot.current?.trackId,
+    }),
     getCurrentTrackId: () => get().currentTrackId,
     audioEngine,
     isPlayable: isTrackPlayable,
@@ -1020,11 +1254,17 @@ async function applyRestoredSnapshot(
     playbackFailureMessage,
     loadAudio,
   });
+  tracePlaybackMutation(`${source} applied`, get, before, {
+    intendedTrackId: snapshot.current?.trackId,
+    force: true,
+    details: { restored },
+  });
   if (refillQueue) void get().ensureQueueDepth();
   return restored;
 }
 
 async function startRecommendation(set, get, mode) {
+  retryPlans.clear();
   getQueueRefillCoordinator().invalidate();
   const token = recommendationRequests.begin(mode);
   if (!token) return false;
@@ -1062,6 +1302,7 @@ async function startRecommendation(set, get, mode) {
       upcoming.map((track) => track.id),
       context,
     );
+    playbackStateService.markLocalChange();
     const activated = await activate(set, get, first, context, {
       pushCurrentToStack: false,
       endPreviousReason: "replaced",
@@ -1069,6 +1310,7 @@ async function startRecommendation(set, get, mode) {
       replaceQueueOnStart: true,
       initialHistory: [],
       shuffleModeOnStart: mode,
+      newQueueSession: true,
     });
     if (!activated || !recommendationRequests.isCurrent(token)) return false;
     set({ shuffleMode: mode, shufflePending: null, shuffleError: null });
@@ -1105,7 +1347,9 @@ function getQueueRefillCoordinator() {
       const context =
         mode === "random"
           ? contextFor("random_shuffle", "Random Shuffle")
-          : contextFor("smart_shuffle", "Smart Shuffle");
+          : mode === "smart"
+            ? contextFor("smart_shuffle", "Smart Shuffle")
+            : contextFor("smart_shuffle", "Recommended");
       useQueueStore
         .getState()
         .appendUnique(
@@ -1115,6 +1359,9 @@ function getQueueRefillCoordinator() {
         );
     },
     isPlayable: isTrackPlayable,
+    trace: (event, details) => {
+      if (isDevelopmentBuild()) console.debug(`[AuricPlayback] ${event}`, details);
+    },
   });
   return queueRefillCoordinator;
 }

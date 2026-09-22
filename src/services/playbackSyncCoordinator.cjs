@@ -17,12 +17,13 @@ function stripTracks(snapshot) {
   };
 }
 
-function createPlaybackSyncCoordinator({ api, storage, enabled }) {
+function createPlaybackSyncCoordinator({ api, storage, enabled, trace = () => {} }) {
   let revision = 0;
   let generation = 0;
+  let selectionGeneration = 0;
+  let activeItemId = null;
   let chain = Promise.resolve();
   let localChain = null;
-  let conflictHandler = null;
 
   const save = (snapshot) => {
     const local = stripTracks(snapshot);
@@ -36,28 +37,62 @@ function createPlaybackSyncCoordinator({ api, storage, enabled }) {
     return tracked;
   };
 
-  const reconcileConflict = async (operationGeneration) => {
+  const reconcileConflict = async () => {
     const remote = await api.get();
-    if (operationGeneration === generation) {
-      revision = remote.revision;
-      await save(remote);
-      if (operationGeneration === generation) await conflictHandler?.(remote);
-    }
+    // A conflict GET supplies a new revision, never a playback selection.
+    // Applying the returned snapshot here can roll back a newer native track.
+    revision = remote.revision;
+    trace("conflict GET metadata", { revision, remoteItemId: remote.current?.id ?? null });
     return remote;
   };
 
-  const queueWrite = (operationGeneration, operation) => {
+  const queueWrite = (kind, operationGeneration, ownerSelectionGeneration, ownerItemId, operation, recover) => {
+    const ownsSelection = () => ownerSelectionGeneration === selectionGeneration &&
+      ownerItemId === activeItemId;
+    const details = () => ({ kind, operationGeneration, ownerSelectionGeneration,
+      currentSelectionGeneration: selectionGeneration, ownerItemId, activeItemId, revision });
+    trace("write queued", details());
     const result = chain
       .catch(() => undefined)
       .then(async () => {
+        if (!ownsSelection()) {
+          trace("stale write skipped", details());
+          return null;
+        }
         try {
+          trace("write dispatched", details());
           const remote = await operation(revision);
           revision = remote.revision;
-          if (operationGeneration === generation) await save(remote);
+          trace("write accepted", details());
+          if (operationGeneration === generation && ownsSelection()) {
+            await save(remote);
+          }
           return remote;
         } catch (error) {
+          trace("write rejected", { ...details(), code: error?.code, status: error?.status, validation: error?.details });
           if (error?.code === "PLAYBACK_STATE_CONFLICT") {
-            await reconcileConflict(operationGeneration);
+            const latest = await reconcileConflict();
+            if (!ownsSelection()) {
+              trace("stale conflict ignored", details());
+              return null;
+            }
+            trace("current selection retry", details());
+            let recovered;
+            try {
+              recovered = await recover(latest, revision);
+            } catch (retryError) {
+              trace("current selection retry rejected", {
+                ...details(), code: retryError?.code, status: retryError?.status,
+                validation: retryError?.details,
+              });
+              throw retryError;
+            }
+            revision = recovered.revision;
+            trace("current selection recovered", details());
+            if (operationGeneration === generation && ownsSelection()) {
+              await save(recovered);
+            }
+            return recovered;
           }
           throw error;
         }
@@ -69,12 +104,18 @@ function createPlaybackSyncCoordinator({ api, storage, enabled }) {
   const hydrateLocal = async () => {
     const hydrationGeneration = generation;
     const local = await storage.load();
-    revision = local?.revision ?? 0;
+    if (hydrationGeneration === generation) {
+      revision = local?.revision ?? 0;
+      activeItemId = local?.current?.id ?? null;
+    }
     return { snapshot: local, source: "local", generation: hydrationGeneration };
   };
 
   const reconcile = async (localSnapshot, startedAtGeneration = generation) => {
     const local = localSnapshot ?? (await storage.load());
+    if (startedAtGeneration !== generation) {
+      return { snapshot: local, source: "local-stale-hydration" };
+    }
     revision = local?.revision ?? 0;
     if (!enabled) return { snapshot: local, source: "local" };
     try {
@@ -83,6 +124,7 @@ function createPlaybackSyncCoordinator({ api, storage, enabled }) {
         return { snapshot: local, source: "local-stale-hydration" };
       }
       revision = remote.revision;
+      activeItemId = remote.current?.id ?? null;
       const remoteIsPristine =
         remote.revision === 0 &&
         remote.current === null &&
@@ -102,6 +144,7 @@ function createPlaybackSyncCoordinator({ api, storage, enabled }) {
         if (startedAtGeneration !== generation) {
           return { snapshot: local, source: "local-stale-hydration" };
         }
+        activeItemId = seeded.current?.id ?? null;
         return { snapshot: seeded, source: "local-bootstrap" };
       }
       await save(remote);
@@ -110,6 +153,9 @@ function createPlaybackSyncCoordinator({ api, storage, enabled }) {
       }
       return { snapshot: remote, source: "server" };
     } catch {
+      if (startedAtGeneration === generation) {
+        activeItemId = local?.current?.id ?? null;
+      }
       return { snapshot: local, source: "offline" };
     }
   };
@@ -121,19 +167,23 @@ function createPlaybackSyncCoordinator({ api, storage, enabled }) {
     get revision() {
       return revision;
     },
+    get selectionGeneration() {
+      return selectionGeneration;
+    },
     isGenerationCurrent(value) {
       return value === generation;
     },
-    setConflictHandler(handler) {
-      conflictHandler = handler;
-    },
     markLocalChange() {
       generation += 1;
+      selectionGeneration += 1;
+      trace("selection generation advanced", { selectionGeneration, activeItemId, revision });
       return generation;
     },
     async stageLocal(snapshot) {
       generation += 1;
+      selectionGeneration += 1;
       const local = { ...stripTracks(snapshot), revision };
+      activeItemId = local.current?.id ?? null;
       await save(local);
       return local;
     },
@@ -145,27 +195,49 @@ function createPlaybackSyncCoordinator({ api, storage, enabled }) {
     },
     replace(snapshot) {
       const operationGeneration = ++generation;
+      const ownerSelectionGeneration = selectionGeneration;
       const local = { ...stripTracks(snapshot), revision };
+      const ownerItemId = local.current?.id ?? null;
+      activeItemId = ownerItemId;
+      trace("local replacement selected", { selectionGeneration, activeItemId, revision,
+        trackId: local.current?.trackId ?? null });
       const localWrite = save(local);
       if (!enabled) return localWrite.then(() => local);
-      const remoteWrite = queueWrite(operationGeneration, (expectedRevision) =>
-        api.replace(local, expectedRevision),
+      const remoteWrite = queueWrite(
+        "replace",
+        operationGeneration,
+        ownerSelectionGeneration,
+        ownerItemId,
+        (expectedRevision) => api.replace(local, expectedRevision),
+        (_remote, expectedRevision) => api.replace(local, expectedRevision),
       );
       return Promise.all([localWrite, remoteWrite]).then(([, remote]) => remote);
     },
     checkpoint(snapshot) {
-      const operationGeneration = ++generation;
       const local = { ...stripTracks(snapshot), revision };
+      if (activeItemId !== null && local.current?.id !== activeItemId) {
+        trace("stale checkpoint skipped", { selectionGeneration, activeItemId,
+          checkpointItemId: local.current?.id ?? null, revision });
+        return Promise.resolve(null);
+      }
+      const operationGeneration = ++generation;
+      const ownerSelectionGeneration = selectionGeneration;
+      const ownerItemId = local.current?.id ?? null;
       const localWrite = save(local);
       if (!enabled || !local.current) return localWrite.then(() => local);
-      const remoteWrite = queueWrite(operationGeneration, (expectedRevision) =>
-        api.checkpoint(
-          {
-            currentTrackId: local.current.trackId,
-            positionMs: local.positionMs,
-          },
-          expectedRevision,
-        ),
+      const checkpointBody = {
+        currentTrackId: local.current.trackId,
+        positionMs: local.positionMs,
+      };
+      const remoteWrite = queueWrite(
+        "checkpoint",
+        operationGeneration,
+        ownerSelectionGeneration,
+        ownerItemId,
+        (expectedRevision) => api.checkpoint(checkpointBody, expectedRevision),
+        (remote, expectedRevision) => remote.current?.id === local.current.id
+          ? api.checkpoint(checkpointBody, expectedRevision)
+          : api.replace(local, expectedRevision),
       );
       return Promise.all([localWrite, remoteWrite]).then(([, remote]) => remote);
     },

@@ -32,6 +32,12 @@ export default function QuickPicksSection({
         </Eyebrow>
       </View>
 
+      {picks && status === "error" ? (
+        <Pressable onPress={onRetry} style={styles.refreshError}>
+          <Text style={styles.statusText}>Could not refresh. Tap to try again.</Text>
+        </Pressable>
+      ) : null}
+
       {!picks ? (
         <Pressable
           onPress={status === "error" ? onRetry : undefined}
@@ -108,6 +114,7 @@ export default function QuickPicksSection({
 }
 
 const styles = StyleSheet.create({
+  refreshError: { paddingHorizontal: 18, paddingBottom: 12 },
   headerRow: {
     flexDirection: "row",
     alignItems: "baseline",
