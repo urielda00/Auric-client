@@ -74,6 +74,7 @@ function createListeningApi(client) {
       return client.post('/api/v1/listening-sessions', {
         id: session.id,
         track_id: session.trackId,
+        started_at_ms: session.startedAtMs,
         start_position_ms: session.startPositionMs,
         context: session.context,
       });

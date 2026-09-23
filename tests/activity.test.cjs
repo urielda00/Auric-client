@@ -59,7 +59,7 @@ function fakeListeningApi(overrides = {}) {
 }
 
 function trackerFixture(options = {}) {
-  let now = 1000;
+  let now = options.initialNow ?? 1_700_000_000_000;
   let id = 0;
   const api = options.api || fakeListeningApi();
   const storage = options.storage || memoryStorage();
@@ -90,6 +90,7 @@ function trackerFixture(options = {}) {
 function status(overrides = {}) {
   return {
     trackId: TRACK_DTO.id,
+    itemId: 'item-1',
     positionMs: 0,
     durationMs: 120000,
     isPlaying: false,
@@ -235,6 +236,93 @@ test('listening starts only on actual play and pause/resume keeps one session', 
   );
 });
 
+test('normal session start, checkpoint, and end use one owned session', async () => {
+  const fixture = trackerFixture({ checkpointIntervalMs: 5000 });
+  fixture.tracker.handleStatus(status({ isPlaying: true }), { type: 'search' });
+  fixture.advance(5000);
+  fixture.tracker.handleStatus(
+    status({ isPlaying: true, positionMs: 5000 }),
+    { type: 'search' },
+  );
+  fixture.advance(1000);
+  assert.equal(
+    await fixture.tracker.end('skipped_next', 6000, {
+      trackId: TRACK_DTO.id,
+      playbackItemId: 'item-1',
+    }),
+    true,
+  );
+  await fixture.tracker.flush();
+  assert.deepEqual(
+    fixture.api.calls.map(([operation]) => operation),
+    ['start', 'checkpoint', 'end'],
+  );
+  assert.equal(fixture.api.calls[2][1].id, 'session-1');
+  assert.equal(fixture.api.calls[2][1].listenedMs, 6000);
+  assert.equal(fixture.api.calls[2][1].positionMs, 6000);
+});
+
+test('short playback ends with finite integer millisecond values', async () => {
+  const fixture = trackerFixture();
+  fixture.tracker.handleStatus(status({ isPlaying: true }), { type: 'direct' });
+  fixture.advance(125);
+  await fixture.tracker.end('stopped', 125.4, {
+    trackId: TRACK_DTO.id,
+    playbackItemId: 'item-1',
+  });
+  const ended = fixture.api.calls.find(([operation]) => operation === 'end');
+  assert.equal(ended[1].listenedMs, 125);
+  assert.equal(ended[1].positionMs, 125);
+});
+
+test('track switch ends A once and starts B as a distinct playback owner', async () => {
+  const fixture = trackerFixture();
+  fixture.tracker.handleStatus(status({ isPlaying: true }), { type: 'search' });
+  fixture.advance(1000);
+  fixture.tracker.handleStatus(
+    status({
+      trackId: '018f0000-0000-7000-8000-000000000002',
+      itemId: 'item-2',
+      isPlaying: true,
+      positionMs: 0,
+    }),
+    { type: 'manual_queue' },
+  );
+  await fixture.tracker.flush();
+  assert.deepEqual(
+    fixture.api.calls.map(([operation, session]) => [operation, session.id]),
+    [
+      ['start', 'session-1'],
+      ['start', 'session-2'],
+      ['end', 'session-1'],
+    ],
+  );
+  assert.equal(fixture.tracker.getSnapshot().id, 'session-2');
+});
+
+test('stale and duplicate end for A cannot end a newer B session', async () => {
+  const fixture = trackerFixture();
+  fixture.tracker.handleStatus(status({ isPlaying: true }), { type: 'search' });
+  const ownerA = { trackId: TRACK_DTO.id, playbackItemId: 'item-1' };
+  fixture.advance(1000);
+  await fixture.tracker.end('replaced', 1000, ownerA);
+  fixture.tracker.handleStatus(
+    status({
+      trackId: '018f0000-0000-7000-8000-000000000002',
+      itemId: 'item-2',
+      isPlaying: true,
+      positionMs: 0,
+    }),
+    { type: 'manual_queue' },
+  );
+  assert.equal(await fixture.tracker.end('completed', 90_000, ownerA), false);
+  assert.equal(fixture.tracker.getSnapshot().id, 'session-2');
+  assert.equal(
+    fixture.api.calls.filter(([operation]) => operation === 'end').length,
+    1,
+  );
+});
+
 test('seeks do not add time and checkpoints are cumulative and bounded', async () => {
   const fixture = trackerFixture({ checkpointIntervalMs: 30000 });
   fixture.tracker.handleStatus(status({ isPlaying: true }), { type: 'direct' });
@@ -321,6 +409,30 @@ test('background checkpoint and pending recovery never count closed time', async
   assert.deepEqual(recovery.storage.value, []);
 });
 
+test('Recents-stop recovery preserves the original elapsed bound', async () => {
+  const recoveredAtMs = 1_700_000_100_000;
+  const storage = memoryStorage([
+    {
+      id: 'recovered-session',
+      trackId: TRACK_DTO.id,
+      context: 'resume',
+      startPositionMs: 0,
+      positionMs: 45_000,
+      durationMs: 120_000,
+      listenedMs: 45_000,
+      endedReason: null,
+    },
+  ]);
+  const fixture = trackerFixture({ storage, initialNow: recoveredAtMs });
+  await fixture.tracker.recoverPending();
+  const started = fixture.api.calls.find(([operation]) => operation === 'start');
+  const ended = fixture.api.calls.find(([operation]) => operation === 'end');
+  assert.equal(started[1].startedAtMs, recoveredAtMs - 45_000);
+  assert.equal(ended[1].listenedMs, 45_000);
+  assert.equal(ended[2], 'app_closed');
+  assert.deepEqual(storage.value, []);
+});
+
 test('playback errors end the active session and stale completion cannot clear a new one', async () => {
   let resolveFirstEnd;
   let endCount = 0;
@@ -387,6 +499,7 @@ test('listening API sends the authoritative cumulative server contract', async (
   const session = {
     id: 'session',
     trackId: TRACK_DTO.id,
+    startedAtMs: 1_700_000_000_000,
     startPositionMs: 100,
     positionMs: 5100,
     listenedMs: 5000,
@@ -395,6 +508,7 @@ test('listening API sends the authoritative cumulative server contract', async (
   await api.start(session);
   await api.checkpoint(session);
   await api.end(session, 'completed');
+  assert.equal(calls[0][2].started_at_ms, 1_700_000_000_000);
   assert.deepEqual(calls[1][2], { listened_ms: 5000, position_ms: 5100 });
   assert.equal(calls[2][2].ended_reason, 'completed');
 });

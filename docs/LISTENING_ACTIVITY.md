@@ -18,10 +18,13 @@ seconds, preventing a suspended or terminated JavaScript runtime from turning
 closed-app wall time into listening time.
 
 Pending session snapshots contain only session/Track IDs, context, duration,
-positions, cumulative listening time, and an optional terminal reason. They are
-stored locally for retry. On launch they are started idempotently if necessary,
-then finalized with their pending reason or `app_closed`; recovery never
-autoplays and never advances the cumulative total.
+positions, the client-observed start time, cumulative listening time, and an
+optional terminal reason. They are stored locally for retry. On launch they are
+started idempotently if necessary, then finalized with their pending reason or
+`app_closed`; recovery never autoplays and never advances the cumulative total.
+Legacy pending snapshots infer the earliest start time required by their saved
+listened total. End calls are scoped to the native queue-item owner, so a late
+callback for an earlier item cannot close its successor's session.
 
 Queue entries retain their initiation context locally. Search, Liked Songs,
 History, Play Next, manual queue, resume, random shuffle, Smart Shuffle, and

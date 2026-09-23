@@ -150,6 +150,17 @@ const listeningTracker = createListeningSessionTracker({
       useLibraryStore.getState().recordPlay(trackId);
     }
   },
+  onError: (error, diagnostic) => {
+    if (!isDevelopmentBuild()) return;
+    console.error("[AuricListeningSession] request failed", {
+      ...diagnostic,
+      code: error?.code,
+      status: error?.status,
+      message: error?.message,
+      validation: error?.details,
+      requestId: error?.requestId,
+    });
+  },
 });
 
 export const usePlayerStore = create((set, get) => ({
@@ -308,7 +319,10 @@ export const usePlayerStore = create((set, get) => ({
         intendedTrackId: previous.currentTrackId, force: true,
         details: { reason: event.reason || "completed" },
       });
-      listeningTracker.end(event.reason || "completed", previous.positionMs);
+      listeningTracker.end(event.reason || "completed", previous.positionMs, {
+        trackId: previous.currentTrackId,
+        playbackItemId: previous.currentItemId,
+      });
     }
     const history = appendAdvancedHistory({
       current: previous.currentTrackId
@@ -573,7 +587,11 @@ export const usePlayerStore = create((set, get) => ({
         await audioEngine.pause();
         tracePlaybackMutation("user pause requested", get, beforePause, { intendedTrackId: beforePause.currentTrackId, force: true });
       } catch {
-        listeningTracker.end("error", get().positionMs);
+        const current = get();
+        listeningTracker.end("error", current.positionMs, {
+          trackId: current.currentTrackId,
+          playbackItemId: current.currentItemId,
+        });
         setPlayback(set, get, { playbackError: playbackFailureMessage(), isPlaying: false },
           "user pause failed");
       }
@@ -602,7 +620,11 @@ export const usePlayerStore = create((set, get) => ({
         await audioEngine.play();
         tracePlaybackMutation("user play requested", get, beforePlay, { intendedTrackId: beforePlay.currentTrackId, force: true });
       } catch {
-        listeningTracker.end("error", get().positionMs);
+        const current = get();
+        listeningTracker.end("error", current.positionMs, {
+          trackId: current.currentTrackId,
+          playbackItemId: current.currentItemId,
+        });
         setPlayback(set, get, { playbackError: playbackFailureMessage(), isPlaying: false },
           "user play failed");
       }
@@ -618,7 +640,11 @@ export const usePlayerStore = create((set, get) => ({
         set({ positionMs: value, playbackError: null });
       }
     } catch {
-      listeningTracker.end("error", get().positionMs);
+      const current = get();
+      listeningTracker.end("error", current.positionMs, {
+        trackId: current.currentTrackId,
+        playbackItemId: current.currentItemId,
+      });
       set({ playbackError: playbackFailureMessage() });
     }
     void persistPlaybackState(get(), "checkpoint");
@@ -896,7 +922,10 @@ async function activate(
         intendedTrackId: previous.currentTrackId, activationGeneration: generation,
         force: true, details: { reason: endPreviousReason },
       });
-      listeningTracker.end(endPreviousReason, previous.positionMs);
+      listeningTracker.end(endPreviousReason, previous.positionMs, {
+        trackId: previous.currentTrackId,
+        playbackItemId: previous.currentItemId,
+      });
     }
     nativeTransitions.reset();
     if (newQueueSession || !queueSessionId) queueSessionId = generateUuid();

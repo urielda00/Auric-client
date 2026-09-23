@@ -2,6 +2,16 @@ const CHECKPOINT_INTERVAL_MS = 30_000;
 const PAUSE_CHECKPOINT_MINIMUM_MS = 5_000;
 const PERSIST_INTERVAL_MS = 5_000;
 const MAX_STATUS_SAMPLE_GAP_MS = 2_000;
+const MAX_MILLISECONDS = Number.MAX_SAFE_INTEGER;
+const ENDED_REASONS = new Set([
+  'completed',
+  'skipped_next',
+  'skipped_previous',
+  'replaced',
+  'stopped',
+  'app_closed',
+  'error',
+]);
 
 const CONTEXT_MAP = Object.freeze({
   direct: 'direct',
@@ -31,13 +41,35 @@ function serializable(session) {
   return {
     id: session.id,
     trackId: session.trackId,
+    playbackItemId: session.playbackItemId || null,
     context: session.context,
+    startedAtMs: session.startedAtMs,
     startPositionMs: session.startPositionMs,
     positionMs: session.positionMs,
     durationMs: session.durationMs,
     listenedMs: session.listenedMs,
     endedReason: session.endedReason || null,
   };
+}
+
+function normalizeMilliseconds(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) return 0;
+  return Math.min(MAX_MILLISECONDS, Math.round(numeric));
+}
+
+function sameOwner(session, owner) {
+  if (!owner) return true;
+  if (owner.sessionId && owner.sessionId !== session.id) return false;
+  if (owner.trackId && owner.trackId !== session.trackId) return false;
+  if (
+    owner.playbackItemId &&
+    session.playbackItemId &&
+    owner.playbackItemId !== session.playbackItemId
+  ) {
+    return false;
+  }
+  return true;
 }
 
 function validPending(value) {
@@ -83,16 +115,26 @@ class ListeningSessionTracker {
   async recoverPending() {
     if (!this.enabled) return;
     const stored = await this.storage.load();
+    const recoveredAtMs = this.now();
     const snapshots = (Array.isArray(stored) ? stored : stored ? [stored] : [])
       .filter(validPending)
       .map((snapshot) => ({
         ...snapshot,
+        playbackItemId:
+          typeof snapshot.playbackItemId === 'string'
+            ? snapshot.playbackItemId
+            : null,
         context: normalizeListeningContext(snapshot.context),
-        startPositionMs: Math.max(0, Number(snapshot.startPositionMs) || 0),
-        positionMs: Math.max(0, Number(snapshot.positionMs) || 0),
-        durationMs: Math.max(0, Number(snapshot.durationMs) || 0),
-        listenedMs: Math.max(0, Math.round(snapshot.listenedMs)),
-        endedReason: snapshot.endedReason || 'app_closed',
+        startedAtMs: normalizeMilliseconds(
+          snapshot.startedAtMs ?? recoveredAtMs - snapshot.listenedMs,
+        ),
+        startPositionMs: normalizeMilliseconds(snapshot.startPositionMs),
+        positionMs: normalizeMilliseconds(snapshot.positionMs),
+        durationMs: normalizeMilliseconds(snapshot.durationMs),
+        listenedMs: normalizeMilliseconds(snapshot.listenedMs),
+        endedReason: ENDED_REASONS.has(snapshot.endedReason)
+          ? snapshot.endedReason
+          : 'app_closed',
         reportedMs: 0,
         startedConfirmed: false,
         chain: Promise.resolve(),
@@ -101,13 +143,19 @@ class ListeningSessionTracker {
 
     await Promise.all(
       snapshots.map(async (session) => {
+        let operation = 'recover-start';
         try {
           const snapshot = serializable(session);
           await this.api.start(snapshot);
+          operation = 'recover-end';
           await this.api.end(snapshot, session.endedReason);
           this.pending.delete(session.id);
         } catch (error) {
-          this.onError(error);
+          this.onError(error, {
+            operation,
+            recovered: true,
+            session: serializable(session),
+          });
         }
       }),
     );
@@ -118,13 +166,26 @@ class ListeningSessionTracker {
     if (!status?.trackId) return;
     if (status.error) {
       if (this.active?.trackId === status.trackId) {
-        this.end('error', status.positionMs);
+        this.end('error', status.positionMs, {
+          trackId: status.trackId,
+          playbackItemId: status.itemId,
+        });
       }
       return;
     }
 
-    if (this.active && this.active.trackId !== status.trackId) {
-      this.end('replaced', this.active.positionMs);
+    const changedOwner = Boolean(
+      this.active &&
+        (this.active.trackId !== status.trackId ||
+          (this.active.playbackItemId &&
+            status.itemId &&
+            this.active.playbackItemId !== status.itemId)),
+    );
+    if (changedOwner) {
+      const previous = this.active;
+      this.end('replaced', previous.positionMs, {
+        sessionId: previous.id,
+      });
     }
     if (!this.active && status.isPlaying === true) {
       this._start(status, playbackContext);
@@ -161,25 +222,29 @@ class ListeningSessionTracker {
     return this._checkpoint(session, force);
   }
 
-  end(endedReason, positionMs) {
+  end(endedReason, positionMs, owner) {
     const session = this.active;
-    if (!session) return Promise.resolve();
+    if (!session || !sameOwner(session, owner)) return Promise.resolve(false);
+    const normalizedReason = ENDED_REASONS.has(endedReason)
+      ? endedReason
+      : 'error';
     this._accrue(session, this.now());
-    session.positionMs = Math.max(0, Math.round(positionMs || 0));
+    session.positionMs = normalizeMilliseconds(positionMs);
     session.wasPlaying = false;
-    session.endedReason = endedReason;
+    session.endedReason = normalizedReason;
     this.active = null;
 
-    if (!this.enabled) return Promise.resolve();
+    if (!this.enabled) return Promise.resolve(true);
     this.pending.set(session.id, session);
     this._persistPending();
     const snapshot = serializable(session);
     return this._enqueue(session, async () => {
       await this._ensureStarted(session, snapshot);
-      await this.api.end(snapshot, endedReason);
+      await this.api.end(snapshot, normalizedReason);
       this.pending.delete(session.id);
       await this._persistPending();
-    });
+      return true;
+    }, 'end');
   }
 
   async flush() {
@@ -200,10 +265,13 @@ class ListeningSessionTracker {
     const session = {
       id: this.createId(),
       trackId: status.trackId,
+      playbackItemId:
+        typeof status.itemId === 'string' ? status.itemId : null,
       context: normalizeListeningContext(playbackContext),
-      startPositionMs: Math.max(0, Math.round(status.positionMs || 0)),
-      positionMs: Math.max(0, Math.round(status.positionMs || 0)),
-      durationMs: Math.max(0, Math.round(status.durationMs || 0)),
+      startedAtMs: now,
+      startPositionMs: normalizeMilliseconds(status.positionMs),
+      positionMs: normalizeMilliseconds(status.positionMs),
+      durationMs: normalizeMilliseconds(status.durationMs),
       listenedMs: 0,
       reportedMs: 0,
       endedReason: null,
@@ -220,15 +288,19 @@ class ListeningSessionTracker {
     this.pending.set(session.id, session);
     this._persistPending();
     const snapshot = serializable(session);
-    this._enqueue(session, () => this._ensureStarted(session, snapshot));
+    this._enqueue(
+      session,
+      () => this._ensureStarted(session, snapshot),
+      'start',
+    );
   }
 
   _sample(session, status, now) {
     this._accrue(session, now);
-    session.positionMs = Math.max(0, Math.round(status.positionMs || 0));
+    session.positionMs = normalizeMilliseconds(status.positionMs);
     session.durationMs = Math.max(
       session.durationMs,
-      Math.round(status.durationMs || 0),
+      normalizeMilliseconds(status.durationMs),
     );
     session.wasPlaying = status.isPlaying === true;
     session.lastSampleAt = now;
@@ -237,7 +309,9 @@ class ListeningSessionTracker {
   _accrue(session, now) {
     if (!session.wasPlaying || !Number.isFinite(session.lastSampleAt)) return;
     const elapsed = Math.max(0, now - session.lastSampleAt);
-    session.listenedMs += Math.min(elapsed, this.maxStatusSampleGapMs);
+    session.listenedMs = normalizeMilliseconds(
+      session.listenedMs + Math.min(elapsed, this.maxStatusSampleGapMs),
+    );
   }
 
   _checkpoint(session, force = false) {
@@ -252,18 +326,24 @@ class ListeningSessionTracker {
       await this.api.checkpoint(snapshot);
       session.reportedMs = Math.max(session.reportedMs, snapshot.listenedMs);
       await this._persistPending();
-    }).finally(() => {
+    }, 'checkpoint').finally(() => {
       session.checkpointQueued = false;
     });
   }
 
-  _enqueue(session, task) {
-    const operation = Promise.resolve(session.chain)
+  _enqueue(session, task, operationName) {
+    const request = Promise.resolve(session.chain)
       .catch(() => undefined)
       .then(task);
-    session.chain = operation;
-    operation.catch((error) => this.onError(error));
-    return operation;
+    session.chain = request;
+    request.catch((error) =>
+      this.onError(error, {
+        operation: operationName,
+        recovered: false,
+        session: serializable(session),
+      }),
+    );
+    return request;
   }
 
   async _ensureStarted(session, snapshot) {
